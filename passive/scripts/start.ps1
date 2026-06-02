@@ -26,7 +26,7 @@ function Get-NodePath {
 }
 
 # Idempotency check
-$existing = Get-Content $pidFile -ErrorAction SilentlyContinue
+$existing = (Get-Content $pidFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
 if ($existing) {
     $old = [int]$existing
     $procOld = Get-Process -Id $old -ErrorAction SilentlyContinue
