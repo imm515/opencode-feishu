@@ -3,6 +3,7 @@ import {
   getActiveSessions,
   getRecentlyArchivedSessions,
   getLatestAssistantPart,
+  getLatestPartInfo,
   getLatestPartTime,
   closeDb,
   refreshDb,
@@ -12,6 +13,7 @@ import {
   loadNotifiedState,
   saveNotifiedState,
   recordPush,
+  recordDone,
   markSeen,
   getEntry,
 } from "./notify-state.js"
@@ -121,8 +123,7 @@ async function poll(): Promise<void> {
       if (!latest) {
         debug("[active:skip] " + title + " no assistant text part found")
         const partTime = await getLatestPartTime(session.id)
-        if (prev) markSeen(state, session.id, partTime, "", 0)
-        else markSeen(state, session.id, partTime, "", 0)
+        markSeen(state, session.id, partTime, "", 0)
         continue
       }
 
@@ -138,37 +139,73 @@ async function poll(): Promise<void> {
       const hasNew = latestTime > prevTime
       debug("[active:check] " + title + " prevTime=" + prevTime + " latestTime=" + latestTime + " hasNew=" + hasNew)
 
-      if (!hasNew) {
-        debug("[active:skip:synced] " + title + " latestTime=" + latestTime + " <= prev.lastSeenTime=" + prevTime)
-        markSeen(state, session.id, latestTime, "", 0)
-        continue
-      }
+      let latestText = ""
 
-      if (!latest.text.trim()) {
+      if (hasNew && latest.text.trim()) {
+        // === PUSH REPLY ===
+        latestText = latest.text
+        try {
+          debug("[active:PUSH:reply] " + title + " partTime=" + latestTime + " textLen=" + latestText.length)
+          if (!DRY_RUN) {
+            await sendNotify({
+              appId: config.appId,
+              appSecret: config.appSecret,
+              sessionId: session.id,
+              sessionTitle: session.title,
+              kind: "reply",
+              text: latestText,
+              textTime: latestTime,
+            })
+          }
+          recordPush(state, session.id, latestText, latestTime, 0)
+          pushes++
+          detailLines.push("reply: " + title)
+        } catch (err) {
+          error("reply push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
+        }
+      } else if (hasNew) {
         debug("[active:skip:empty] " + title + " latestTime=" + latestTime + " text is empty")
         markSeen(state, session.id, latestTime, "", 0)
-        continue
       }
 
-      // === PUSH ===
-      try {
-        debug("[active:PUSH] " + title + " partTime=" + latestTime + " textLen=" + latest.text.length)
-        if (!DRY_RUN) {
-          await sendNotify({
-            appId: config.appId,
-            appSecret: config.appSecret,
-            sessionId: session.id,
-            sessionTitle: session.title,
-            kind: "reply",
-            text: latest.text,
-            textTime: latestTime,
-          })
+      // === DONE DETECTION: step-finish(reason=stop) ===
+      const lastDoneTime = prev?.lastDoneTime ?? 0
+      const partInfo = await getLatestPartInfo(session.id)
+      if (partInfo && partInfo.type === "step-finish" && partInfo.reason === "stop" && partInfo.time_created > lastDoneTime) {
+        // Only push done if the step-finish is after the last text we pushed
+        const doneTime = partInfo.time_created
+        if (doneTime > prevTime) {
+          if (!latestText) {
+            const latestPart = await getLatestAssistantPart(session.id)
+            latestText = latestPart?.text ?? ""
+          }
+          try {
+            debug("[active:PUSH:done] " + title + " doneTime=" + doneTime + " textLen=" + latestText.length)
+            if (!DRY_RUN) {
+              await sendNotify({
+                appId: config.appId,
+                appSecret: config.appSecret,
+                sessionId: session.id,
+                sessionTitle: session.title,
+                kind: "done",
+                text: latestText || null,
+                textTime: doneTime,
+                archiveTime: 0,
+              })
+            }
+            recordDone(state, session.id, doneTime)
+            pushes++
+            detailLines.push("done: " + title)
+          } catch (err) {
+            error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
+          }
+        } else {
+          debug("[active:skip:done:old] " + title + " doneTime=" + doneTime + " <= prevTime=" + prevTime)
         }
-        recordPush(state, session.id, latest.text, latestTime, 0)
-        pushes++
-        detailLines.push("reply: " + title)
-      } catch (err) {
-        error("reply push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
+      }
+
+      if (!hasNew) {
+        markSeen(state, session.id, latestTime, "", 0)
       }
     }
   }

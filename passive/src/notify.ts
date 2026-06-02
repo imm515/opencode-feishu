@@ -8,11 +8,17 @@ import { LOG_DIR } from "./paths.js"
 
 const THREAD_TEMPLATES: { template: CardTemplate }[] = [
   { template: "blue" },
+  { template: "wathet" },
+  { template: "turquoise" },
   { template: "green" },
+  { template: "yellow" },
   { template: "orange" },
-  { template: "grey" },
-  { template: "purple" },
   { template: "red" },
+  { template: "carmine" },
+  { template: "violet" },
+  { template: "purple" },
+  { template: "indigo" },
+  { template: "grey" },
 ]
 
 const COLOR_FILE = LOG_DIR + "/session-colors.json"

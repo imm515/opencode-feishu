@@ -5,7 +5,7 @@ export type SectionInput =
   | { type: "actions"; buttons?: readonly { text: string; value: string; style?: "primary" | "default" | "danger" }[] }
   | { type: "collapse"; title?: string; content?: string }
 
-export type CardTemplate = "blue" | "green" | "orange" | "red" | "purple" | "grey"
+export type CardTemplate = "blue" | "wathet" | "turquoise" | "green" | "yellow" | "orange" | "red" | "carmine" | "violet" | "purple" | "indigo" | "grey" | "default"
 
 export interface CardArgs {
   title: string
