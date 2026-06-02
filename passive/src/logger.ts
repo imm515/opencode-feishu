@@ -1,8 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, writeFileSync, readFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { LOG_DIR } from "./paths.js"
 
-const MAX_SIZE = 5 * 1024 * 1024
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 function ensureLogDir() {
@@ -21,20 +20,11 @@ function prune() {
   const now = Date.now()
   try {
     for (const f of readdirSync(LOG_DIR)) {
-      if (!f.match(/^\d{4}-\d{2}-\d{2}\.log$/)) continue
+      const isDailyLog = /^\d{4}-\d{2}-\d{2}\.log$/.test(f)
+      const isRotateLog = f.startsWith("rotate-")
+      if (!isDailyLog && !isRotateLog) continue
       const age = now - statSync(join(LOG_DIR, f)).mtimeMs
       if (age > MAX_AGE_MS) unlinkSync(join(LOG_DIR, f))
-    }
-  } catch { /* skip */ }
-}
-
-function rotate() {
-  const p = logPath()
-  if (!existsSync(p)) return
-  try {
-    if (statSync(p).size > MAX_SIZE) {
-      writeFileSync(join(LOG_DIR, `rotate-${Date.now()}.log`), readFileSync(p))
-      writeFileSync(p, "")
     }
   } catch { /* skip */ }
 }
@@ -55,8 +45,6 @@ function toLocalIso(d: Date): string {
 function doLog(level: string, tag: string, msg: string, extra?: Record<string, unknown>) {
   if (level === "DEBUG" && !verboseFlag) return
   ensureLogDir()
-  prune()
-  rotate()
   const ts = toLocalIso(new Date())
   const extraStr = extra ? ` ${JSON.stringify(extra)}` : ""
   const line = `[${ts}] [${level}] [${tag}] ${msg}${extraStr}\n`
@@ -72,7 +60,14 @@ export const debug = (msg: string, extra?: Record<string, unknown>) => doLog("DE
 let verboseFlag = false
 export function setVerbose(on: boolean): void { verboseFlag = on }
 
+let _lastPrune = 0
+
 export function logPoll(sessions: number, transitions: number, details?: string, stateChanges = 0) {
+  const now = Date.now()
+  if (now - _lastPrune > 60_000) {
+    prune()
+    _lastPrune = now
+  }
   const d = toLocalIso(new Date())
   const extraStr = details ? ` detail="${details}"` : ""
   const stateStr = stateChanges > 0 ? ` stateChanges=${stateChanges}` : ""

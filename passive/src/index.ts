@@ -190,7 +190,7 @@ async function poll(): Promise<void> {
                 kind: "done",
                 text: latestText || null,
                 textTime: doneTime,
-                archiveTime: 0,
+                archiveTime: doneTime,
               })
             }
             recordDone(state, session.id, doneTime)
