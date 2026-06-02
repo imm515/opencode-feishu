@@ -25,7 +25,30 @@ function Get-NodePath {
     throw "node.exe not found in PATH or $candidates"
 }
 
-# Idempotency check
+function Find-AllDaemonPids {
+    $pids = @()
+    $processes = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue
+    foreach ($p in $processes) {
+        if ($p.CommandLine -match 'dist[\\/]index\.js') {
+            $pids += $p.ProcessId
+        }
+    }
+    return $pids
+}
+
+function Enforce-SingleDaemon {
+    $pids = Find-AllDaemonPids
+    if ($pids.Count -le 1) { return $pids }
+    Write-Host "[warn] found $($pids.Count) daemon instances, keeping the first"
+    $keep = $pids[0]
+    foreach ($extraPid in $pids[1..($pids.Count - 1)]) {
+        Write-Host "  killing PID $extraPid"
+        Stop-Process -Id $extraPid -Force -ErrorAction SilentlyContinue
+    }
+    return @($keep)
+}
+
+# Idempotency check: PID file
 $existing = (Get-Content $pidFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
 if ($existing) {
     $old = [int]$existing
@@ -37,6 +60,16 @@ if ($existing) {
         Write-Host "[stale-pid] removing stale .passive.pid ($old)"
         Remove-Item $pidFile -Force
     }
+}
+
+# Idempotency check: full process scan (catches orphaned daemons not in PID file)
+$orphanPids = Find-AllDaemonPids
+if ($orphanPids.Count -gt 0) {
+    $orphanPids = Enforce-SingleDaemon
+    $keepPid = $orphanPids[0]
+    Write-Host "[skip] daemon already running as PID $keepPid (process scan)"
+    [System.IO.File]::WriteAllText($pidFile, "$keepPid")
+    exit 0
 }
 
 if (-not (Test-Path $distEntry)) {

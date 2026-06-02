@@ -7,7 +7,7 @@ $scriptRoot   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $passiveRoot  = Resolve-Path (Join-Path $scriptRoot "..")
 $pidFile      = Join-Path $passiveRoot ".passive.pid"
 
-$procId = Get-Content $pidFile -ErrorAction SilentlyContinue
+$procId = (Get-Content $pidFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
 if (-not $procId) {
     Write-Host "[skip] no .passive.pid — daemon not running"
     exit 0

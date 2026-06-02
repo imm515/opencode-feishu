@@ -11,7 +11,7 @@ Write-Host "=== opencode-feishu passive status ==="
 Write-Host "pidfile: $pidFile"
 Write-Host ""
 
-$procId = Get-Content $pidFile -ErrorAction SilentlyContinue
+$procId = (Get-Content $pidFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
 if (-not $procId) {
     Write-Host "state: NOT RUNNING (no .passive.pid)"
 } else {
