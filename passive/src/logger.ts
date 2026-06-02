@@ -1,8 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, writeFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import os from "node:os"
+import { LOG_DIR } from "./paths.js"
 
-const LOG_DIR = join(os.homedir(), "Program Files Dev", "opencode-feishu", "logs")
 const MAX_SIZE = 5 * 1024 * 1024
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -40,11 +39,25 @@ function rotate() {
   } catch { /* skip */ }
 }
 
+function toLocalIso(d: Date): string {
+  const off = 8 * 60
+  const local = new Date(d.getTime() + off * 60_000)
+  const y = local.getUTCFullYear()
+  const m = String(local.getUTCMonth() + 1).padStart(2, "0")
+  const dd = String(local.getUTCDate()).padStart(2, "0")
+  const hh = String(local.getUTCHours()).padStart(2, "0")
+  const mm = String(local.getUTCMinutes()).padStart(2, "0")
+  const ss = String(local.getUTCSeconds()).padStart(2, "0")
+  const ms = String(local.getUTCMilliseconds()).padStart(3, "0")
+  return `${y}-${m}-${dd}T${hh}:${mm}:${ss}.${ms}+08:00`
+}
+
 function doLog(level: string, tag: string, msg: string, extra?: Record<string, unknown>) {
+  if (level === "DEBUG" && !verboseFlag) return
   ensureLogDir()
   prune()
   rotate()
-  const ts = new Date().toISOString()
+  const ts = toLocalIso(new Date())
   const extraStr = extra ? ` ${JSON.stringify(extra)}` : ""
   const line = `[${ts}] [${level}] [${tag}] ${msg}${extraStr}\n`
   process.stderr.write(line)
@@ -54,11 +67,16 @@ function doLog(level: string, tag: string, msg: string, extra?: Record<string, u
 export const info = (msg: string, extra?: Record<string, unknown>) => doLog("INFO", "passive", msg, extra)
 export const warn = (msg: string, extra?: Record<string, unknown>) => doLog("WARN", "passive", msg, extra)
 export const error = (msg: string, extra?: Record<string, unknown>) => doLog("ERROR", "passive", msg, extra)
+export const debug = (msg: string, extra?: Record<string, unknown>) => doLog("DEBUG", "passive", msg, extra)
 
-export function logPoll(sessions: number, transitions: number, details?: string) {
-  const d = new Date().toISOString()
+let verboseFlag = false
+export function setVerbose(on: boolean): void { verboseFlag = on }
+
+export function logPoll(sessions: number, transitions: number, details?: string, stateChanges = 0) {
+  const d = toLocalIso(new Date())
   const extraStr = details ? ` detail="${details}"` : ""
-  const line = `[${d}] [INFO] [passive] poll: sessions=${sessions} transitions=${transitions}${extraStr}\n`
+  const stateStr = stateChanges > 0 ? ` stateChanges=${stateChanges}` : ""
+  const line = `[${d}] [INFO] [passive] poll: sessions=${sessions} transitions=${transitions}${stateStr}${extraStr}\n`
   process.stderr.write(line)
   ensureLogDir()
   try { appendFileSync(logPath(), line) } catch { /* skip */ }

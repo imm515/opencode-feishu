@@ -5,9 +5,11 @@ export type SectionInput =
   | { type: "actions"; buttons?: readonly { text: string; value: string; style?: "primary" | "default" | "danger" }[] }
   | { type: "collapse"; title?: string; content?: string }
 
+export type CardTemplate = "blue" | "green" | "orange" | "red" | "purple" | "grey"
+
 export interface CardArgs {
   title: string
-  template?: "blue" | "green" | "orange" | "red" | "purple" | "grey"
+  template?: CardTemplate
   sections: SectionInput[]
 }
 

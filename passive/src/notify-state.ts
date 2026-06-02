@@ -1,30 +1,42 @@
-import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
-import { existsSync as pathExists } from "node:fs"
-import type { AiState } from "./state-machine.js"
+﻿import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from "node:fs"
+import { LOG_DIR, STATE_FILE } from "./paths.js"
 
-const STATE_DIR = join(process.cwd(), "logs")
-const STATE_FILE = join(STATE_DIR, "notify-state.json")
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
-export interface NotifiedEntry {
-  state: AiState
-  notifiedAt: number
-  transition: string | null
+export interface SessionTrackEntry {
+  lastSeenTime: number
+  lastSeenText: string
+  lastSeenArchiveTime: number
+  lastPushedAt: number
 }
 
-export type NotifiedMap = Record<string, NotifiedEntry> & { _primed?: boolean }
+export type NotifiedMap = Record<string, SessionTrackEntry> & {
+  _schemaVersion?: number
+  _daemonStartedAt?: number
+}
+
+const SCHEMA_VERSION = 3
 
 function ensureDir(): void {
-  if (!pathExists(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true })
+  if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true })
+}
+
+function isLegacy(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object") return false
+  const obj = raw as Record<string, unknown>
+  for (const v of Object.values(obj)) {
+    if (v && typeof v === "object" && "state" in (v as object)) return true
+  }
+  return false
 }
 
 export function loadNotifiedState(): NotifiedMap {
   if (!existsSync(STATE_FILE)) return {}
   try {
-    const raw = readFileSync(STATE_FILE, "utf-8")
-    const parsed = JSON.parse(raw) as NotifiedMap
-    return parsed && typeof parsed === "object" ? parsed : {}
+    const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as NotifiedMap
+    if (isLegacy(raw)) return {}
+    if (raw && typeof raw === "object") return raw
+    return {}
   } catch {
     return {}
   }
@@ -33,32 +45,56 @@ export function loadNotifiedState(): NotifiedMap {
 export function saveNotifiedState(map: NotifiedMap): void {
   ensureDir()
   pruneOldEntries(map)
+  map._schemaVersion = SCHEMA_VERSION
   const tmp = STATE_FILE + ".tmp"
   try {
     writeFileSync(tmp, JSON.stringify(map, null, 2), "utf-8")
     renameSync(tmp, STATE_FILE)
-  } catch {
-    /* skip */
-  }
+  } catch { /* skip */ }
 }
 
 function pruneOldEntries(map: NotifiedMap): void {
   const cutoff = Date.now() - MAX_AGE_MS
   for (const key of Object.keys(map)) {
-    if (map[key].notifiedAt < cutoff) delete map[key]
+    if (key.startsWith("_")) continue
+    const e = map[key]
+    if (!e || e.lastPushedAt < cutoff) delete map[key]
   }
 }
 
-export function recordNotified(
+export function recordPush(
   map: NotifiedMap,
   sessionId: string,
-  state: AiState,
-  transition: string | null,
+  text: string,
+  partTime: number,
+  archiveTime: number,
 ): void {
-  map[sessionId] = { state, notifiedAt: Date.now(), transition }
-  saveNotifiedState(map)
+  map[sessionId] = {
+    lastSeenTime: partTime,
+    lastSeenText: text,
+    lastSeenArchiveTime: archiveTime,
+    lastPushedAt: Date.now(),
+  }
 }
 
-export function getNotified(map: NotifiedMap, sessionId: string): NotifiedEntry | null {
+// FIX: lastPushedAt must be Date.now() so newly primed entries survive
+// pruneOldEntries on the next poll cycle (was: prev?.lastPushedAt ?? 0)
+export function markSeen(
+  map: NotifiedMap,
+  sessionId: string,
+  partTime: number,
+  text: string,
+  archiveTime: number,
+): void {
+  const prev = map[sessionId]
+  map[sessionId] = {
+    lastSeenTime: partTime > (prev?.lastSeenTime ?? 0) ? partTime : (prev?.lastSeenTime ?? 0),
+    lastSeenText: text,
+    lastSeenArchiveTime: archiveTime || (prev?.lastSeenArchiveTime ?? 0),
+    lastPushedAt: prev?.lastPushedAt ?? Date.now(),
+  }
+}
+
+export function getEntry(map: NotifiedMap, sessionId: string): SessionTrackEntry | null {
   return map[sessionId] ?? null
 }

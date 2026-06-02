@@ -1,86 +1,109 @@
 import { info, error } from "./logger.js"
 import { sendInteractiveCard } from "./sender.js"
-import { buildCardFromDSL, type CardArgs } from "./card-dsl.js"
-import type { AiState } from "./state-machine.js"
+import { buildCardFromDSL, type CardArgs, type CardTemplate } from "./card-dsl.js"
 import { CHAT_ID } from "./config.js"
 import { truncateMarkdown } from "./markdown.js"
 
-type StateTransition = "any→waiting" | "any→working" | "any→done"
+const THREAD_TEMPLATES: { template: CardTemplate }[] = [
+  { template: "blue" },
+  { template: "green" },
+  { template: "orange" },
+  { template: "grey" },
+  { template: "purple" },
+  { template: "red" },
+]
+
+function hashSession(sessionId: string): number {
+  let hash = 0
+  for (const ch of sessionId) {
+    hash = ((hash * 31) + ch.charCodeAt(0)) >>> 0
+  }
+  return hash
+}
+
+function threadTemplate(sessionId: string): CardTemplate {
+  return THREAD_TEMPLATES[hashSession(sessionId) % THREAD_TEMPLATES.length].template
+}
+
+export type PushKind = "reply" | "done"
 
 export interface NotifyParams {
   appId: string
   appSecret: string
   sessionId: string
   sessionTitle: string | null
-  state: AiState
-  transition: StateTransition
-  resultText?: string | null
+  kind: PushKind
+  text: string | null
+  archiveTime?: number | null
+  textTime?: number | null
+}
+
+function shortTitle(title: string | null | undefined, id: string): string {
+  if (!title) return id
+  return title.length > 40 ? title.slice(0, 40) + "…" : title
+}
+
+function fmtTime(ms: number | null | undefined): string {
+  if (!ms) return ""
+  const d = new Date(ms)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  const hh = String(d.getHours()).padStart(2, "0")
+  const mm = String(d.getMinutes()).padStart(2, "0")
+  const ss = String(d.getSeconds()).padStart(2, "0")
+  return `${y}-${m}-${dd} ${hh}:${mm}:${ss}`
 }
 
 export async function sendNotify(params: NotifyParams): Promise<void> {
-  const { appId, appSecret, sessionId, sessionTitle, state, transition, resultText } = params
+  const { appId, appSecret, sessionId, sessionTitle, kind, text, archiveTime, textTime } = params
 
-  const emoji = state === "working" ? "🔄" : state === "waiting" ? "❓" : state === "done" ? "✅" : "❔"
-  let title = ""
-  let body = ""
-  let template: CardArgs["template"] = "blue"
+  const t = shortTitle(sessionTitle, sessionId)
   const sections: CardArgs["sections"] = []
+  let title = ""
+  const template = threadTemplate(sessionId)
 
-  const shortTitle = sessionTitle
-    ? (sessionTitle.length > 40 ? sessionTitle.slice(0, 40) + "…" : sessionTitle)
-    : sessionId
-
-  switch (transition) {
-    case "any→waiting":
-      title = `${emoji} OpenCode 需要你处理`
-      template = "blue"
-      body = `**会话**: ${shortTitle}\n\nAI 已完成当前回复，等待你的下一步指示。`
-      sections.push({ type: "markdown", content: body })
-      break
-    case "any→working":
-      title = `${emoji} OpenCode 正在继续`
-      template = "green"
-      body = `**会话**: ${shortTitle}\n\nAI 已收到你的输入，正在处理中...`
-      sections.push({ type: "markdown", content: body })
-      break
-    case "any→done":
-      title = `${emoji} OpenCode 任务完成`
-      template = "green"
-      sections.push({ type: "markdown", content: `**会话**: ${shortTitle}` })
-      if (resultText && resultText.trim()) {
-        sections.push({ type: "divider" })
-        sections.push({ type: "markdown", content: truncateMarkdown(resultText) })
-      } else {
-        sections.push({ type: "markdown", content: `\n任务已全部完成（无文本输出）。` })
-      }
-      break
+  if (kind === "done") {
+    title = `✅ OpenCode 任务完成`
+    sections.push({ type: "markdown", content: `**会话**: ${t}` })
+    if (text && text.trim()) {
+      sections.push({ type: "divider" })
+      sections.push({ type: "markdown", content: truncateMarkdown(text) })
+    } else {
+      sections.push({ type: "markdown", content: `\n任务已结束（无文本输出）。` })
+    }
+    sections.push({
+      type: "note",
+      content: `结束时间: ${fmtTime(archiveTime)}  |  session: ${sessionId.slice(0, 12)}…`,
+    })
+    sections.push({ type: "markdown", content: "<at id=all></at>" })
+  } else {
+    title = `💬 OpenCode 新回复`
+    sections.push({ type: "markdown", content: `**会话**: ${t}` })
+    if (text && text.trim()) {
+      sections.push({ type: "divider" })
+      sections.push({ type: "markdown", content: truncateMarkdown(text) })
+    } else {
+      sections.push({ type: "markdown", content: `\nAI 已产生新内容（无文本）。` })
+    }
+    sections.push({
+      type: "note",
+      content: `回复时间: ${fmtTime(textTime)}  |  session: ${sessionId.slice(0, 12)}…`,
+    })
   }
 
-  info(`Sending notification: ${transition} for session ${sessionId}`, {
+  info(`[push] kind=${kind} session=${sessionId.slice(0, 12)} text_len=${text?.length ?? 0}`, {
     title,
     template,
     chatId: CHAT_ID,
-    sessionTitle: shortTitle,
-    hasResult: !!resultText,
+    sessionTitle: t,
   })
 
-  const card = buildCardFromDSL({
-    title,
-    template,
-    sections,
-  })
-
+  const card = buildCardFromDSL({ title, template, sections })
   const result = await sendInteractiveCard(appId, appSecret, CHAT_ID, card)
   if (result.ok) {
-    info(`Notification sent: ${transition} for ${sessionId}`, {
-      messageId: result.messageId,
-      chatId: CHAT_ID,
-    })
+    info(`[push] sent message_id=${result.messageId} kind=${kind} session=${sessionId.slice(0, 12)}`)
   } else {
-    error(`Notification failed: ${result.error}`, {
-      transition,
-      sessionId,
-      chatId: CHAT_ID,
-    })
+    error(`[push] failed: ${result.error}`, { kind, sessionId, chatId: CHAT_ID })
   }
 }
