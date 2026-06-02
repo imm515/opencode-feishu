@@ -50,11 +50,8 @@ export type Transition =
   | null
 
 export function detectTransition(prev: AiState | null, curr: AiState): Transition {
+  if (prev === null) return null
   if (prev === curr) return null
-  if (prev === null) {
-    if (curr === "waiting" || curr === "done") return `any→${curr}` as Transition
-    return null
-  }
   return `any→${curr}` as Transition
 }
 

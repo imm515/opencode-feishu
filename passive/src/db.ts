@@ -77,24 +77,28 @@ export async function getRecentlyArchivedSessions(graceMs: number): Promise<Sess
 export interface TextPart {
   text: string
   time_created: number
+  role: "user" | "assistant"
 }
 
-export async function getLastTextPart(sessionId: string): Promise<TextPart | null> {
+export async function getLastTextPart(sessionId: string, role: "user" | "assistant" = "assistant"): Promise<TextPart | null> {
   const db = await getDb()
   const results = db.exec(`
     SELECT
-      json_extract(data, '$.text') AS text,
-      time_created
-    FROM part
-    WHERE session_id = '${sessionId.replace(/'/g, "''")}'
-      AND json_extract(data, '$.type') = 'text'
-    ORDER BY time_created DESC
+      json_extract(p.data, '$.text') AS text,
+      p.time_created,
+      json_extract(m.data, '$.role') AS role
+    FROM part AS p
+    JOIN message AS m ON m.id = p.message_id
+    WHERE p.session_id = '${sessionId.replace(/'/g, "''")}'
+      AND json_extract(p.data, '$.type') = 'text'
+      AND json_extract(m.data, '$.role') = '${role}'
+    ORDER BY p.time_created DESC
     LIMIT 1
   `)
   if (!results.length || !results[0].values.length) return null
-  const [text, time_created] = results[0].values[0] as [string | null, number]
+  const [text, time_created, roleFound] = results[0].values[0] as [string | null, number, string | null]
   if (!text) return null
-  return { text, time_created }
+  return { text, time_created, role: (roleFound ?? role) as "user" | "assistant" }
 }
 
 export async function getSessionParts(sessionId: string): Promise<PartRow[]> {

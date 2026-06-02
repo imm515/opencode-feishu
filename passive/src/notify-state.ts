@@ -13,7 +13,7 @@ export interface NotifiedEntry {
   transition: string | null
 }
 
-export type NotifiedMap = Record<string, NotifiedEntry>
+export type NotifiedMap = Record<string, NotifiedEntry> & { _primed?: boolean }
 
 function ensureDir(): void {
   if (!pathExists(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true })
