@@ -3,27 +3,49 @@ param(
     [string]$ChatId = "oc_82bb66a73329cf403644debd24c86ec5",
     [int]$PollMs = 20000,
     [switch]$Daemon,
-    [switch]$Debug
+    [switch]$Debug,
+    [string]$SessionTitle = "",
+    [string]$Duration = "",
+    [string]$NotifyType = "info"
 )
 
 $ErrorActionPreference = "Stop"
 
-function Send-Feishu($msg) {
+function Send-FeishuCard($title, $bodyMd, $color) {
+    if ([string]::IsNullOrWhiteSpace($color)) { $color = "blue" }
     $cfg = Get-Content "$env:USERPROFILE\.config\opencode\plugins\feishu.json" -Raw | ConvertFrom-Json
     $body = @{app_id=$cfg.appId; app_secret=$cfg.appSecret} | ConvertTo-Json -Compress
     $tokenResp = Invoke-RestMethod -Uri "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" -Method Post -Body $body -ContentType "application/json" -Proxy "http://127.0.0.1:10809"
     $token = $tokenResp.tenant_access_token
-    $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $postObj = @{zh_cn=@{title="";content=@(@(@{tag="md";text="${msg}\n\n📅 ${now}"}),@(@{tag="at";user_id="all";user_name="所有人"}))}}
-    $contentStr = $postObj | ConvertTo-Json -Compress -Depth 10
-    $msgBody = @{receive_id=$ChatId; msg_type="post"; content=$contentStr} | ConvertTo-Json -Compress -Depth 5
+    $card = @{
+        config = @{wide_screen_mode=$true}
+        header = @{title=@{tag="plain_text"; content=$title}; template=$color}
+        elements = @(
+            @{tag="markdown"; content=$bodyMd}
+        )
+    }
+    $contentStr = $card | ConvertTo-Json -Compress -Depth 10
+    $msgBody = @{receive_id=$ChatId; msg_type="interactive"; content=$contentStr} | ConvertTo-Json -Compress -Depth 5
     try {
         $resp = Invoke-RestMethod -Uri "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id" -Method Post -Headers @{Authorization="Bearer $token"} -Body $msgBody -ContentType "application/json" -Proxy "http://127.0.0.1:10809"
         if ($Debug) {
-            if ($resp.code -eq 0) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Sent: $($resp.data.message_id)" }
-            else { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Error: $($resp.code) $($resp.msg)" }
+            if ($resp.code -eq 0) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Card sent: $($resp.data.message_id)" }
+            else { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Card error: $($resp.code) $($resp.msg)" }
         }
-    } catch { if ($Debug) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ERROR: $_" } }
+    } catch { if ($Debug) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Card exception: $_" } }
+}
+
+function Get-SessionInfo($sid) {
+    $q = "SELECT title, time_created, time_updated FROM session WHERE id='$sid'"
+    $row = & sqlite3 $DbPath $q 2>&1
+    if ([string]::IsNullOrWhiteSpace($row)) { return @{} }
+    $parts = $row -split '\|'
+    $title = $parts[0]
+    $created = if ($parts.Length -ge 2) { [long]$parts[1] } else { 0 }
+    $updated = if ($parts.Length -ge 3) { [long]$parts[2] } else { 0 }
+    $durMin = if ($created -gt 0) { [math]::Round(($updated - $created) / 60000, 1) } else { 0 }
+    $createdStr = if ($created -gt 0) { (Get-Date -Date "1970-01-01 00:00:00Z").AddMilliseconds($created).ToLocalTime().ToString("MM-dd HH:mm") } else { "?" }
+    return @{title=$title; duration="${durMin}分钟"; created=$createdStr}
 }
 
 $sessions = @{}
@@ -71,30 +93,37 @@ while ($true) {
 
         if ($ta -ne $null -and $state.ai_state -ne "done") {
             $state.ai_state = "done"
-            if ($Debug) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] DONE: $safeTitle" }
-            Send-Feishu "**✅ 任务完成**\n📄 ${safeTitle}"
+            $info = Get-SessionInfo $sid
+            $safeTitle = $info.title -replace '\|', ''
+            $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            $bodyMd = "📄 **${safeTitle}**\n\n🕐 开始: ${info.created}\n⏱ 耗时: ${info.duration}\n\n✅ @所有人"
+            if ($Debug) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] DONE: $safeTitle (${info.duration})" }
+            Send-FeishuCard "✅ 任务完成" $bodyMd "green"
             continue
         }
         if ($tu -eq $state.time_updated -and $aiState -eq $oldState) { continue }
         $state.time_updated = $tu; $state.ai_state = $aiState
         if ($firstRun) { continue }
 
-        if ($oldState -eq "working" -and ($aiState -eq "waiting" -or $aiState -eq "no_parts")) {
-            if ($Debug) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] WAITING: $safeTitle" }
-            Send-Feishu "**❓ 需要关注**\n📄 ${safeTitle}\n⚡ 工作完成，等待输入"
-        }
         if ($oldState -eq "waiting" -and $aiState -eq "working") {
+            $info = Get-SessionInfo $sid
+            $safeTitle = $info.title -replace '\|', ''
+            $now = Get-Date -Format "HH:mm:ss"
+            $bodyMd = "📄 **${safeTitle}**\n\n💬 已收到新回复，任务继续执行\n\n⏱ ${now}\n@所有人"
             if ($Debug) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RESUME: $safeTitle" }
-            Send-Feishu "**🔄 继续执行**\n📄 ${safeTitle}\n💬 已收到回复"
+            Send-FeishuCard "🔄 继续执行" $bodyMd "blue"
         }
     }
 
     foreach ($sid in $sessions.Keys) {
         if (-not $seenIds.ContainsKey($sid) -and $sessions[$sid].ai_state -ne "gone") {
             $sessions[$sid].ai_state = "gone"
-            $safeTitle = $sessions[$sid].title -replace '\|', ''
+            $info = Get-SessionInfo $sid
+            $safeTitle = $info.title -replace '\|', ''
+            $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            $bodyMd = "📄 **${safeTitle}**\n\n🕐 ${info.created}\n⏱ ${info.duration}\n\n⏱ ${now}\n@所有人"
             if ($Debug) { Write-Host "[$(Get-Date -Format 'HH:mm:ss')] GONE: $safeTitle" }
-            Send-Feishu "**🗑 会话已关闭**\n📄 ${safeTitle}"
+            Send-FeishuCard "🗑 会话已关闭" $bodyMd "grey"
         }
     }
 
