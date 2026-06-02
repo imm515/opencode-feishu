@@ -1,0 +1,10 @@
+node_modules/
+dist/
+logs/
+*.log
+.passive.pid
+.env
+.env.local
+.DS_Store
+Thumbs.db
+*.tsbuildinfo

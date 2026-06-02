@@ -1,0 +1,149 @@
+# CLAUDE.md
+
+## 目录职责
+
+- 本目录负责 OpenCode 会话、事件、交互和 run 生命周期编排。
+- 它连接输入、队列、SSE 事件、abort、终态冻结和错误收口。
+
+## 可以在这里放
+
+- chat、event、interactive、action-bus、session-queue、reply-run-registry 等编排代码。
+
+## 不要在这里放
+
+- Feishu SDK 细节封装；那类代码进入 `src/feishu/`。
+- 通过 synthetic 输入或启发式补写去代替 agent 生成主回复内容。
+
+## 修改约束
+
+- 对输入的增强仅限明确记录的最小必要上下文增强。
+- 对输出的加工仅限状态控制、终态冻结和展示投影，不应发展为语义总结器。
+
+## 文件职责
+
+**chat.ts** — 核心对话处理器
+- `handleChat()` 完整走完一条飞书消息：绑定 session → 捕获 baseline → 构造 prompt → `promptAsync()` 异步发送 → 轮询等待输出稳定 → 写回飞书
+- 启动 StreamingCard（CardKit 不可用时降级为纯文本占位），通过 action-bus 订阅 text-updated / tool-state-changed / permission / question 事件实时更新卡片
+- 轮询期间每轮检查 SSE 缓存错误，检测到 `SessionErrorDetected` 立即终止
+- catch 块是 `classify()` 的**唯一调用点**（FR-011）：通过 `matchPluginError` exhaustive handler 分发到具体错误处理路径
+
+**baseline 机制（v1.10.7 引入）**：`promptAsync` 之前抓一张 `extractLastAssistantSnapshot` 作为 baseline，传给 `pollForResponse`。轮询过程中若 snapshot 与 baseline 完全相同（旧 turn 的回复未变），跳过本轮不累计 `sameCount`。这避免了"复用 session + 新 turn 慢"场景下 stable 检查在第一次轮询就被旧文本满足，把上一轮回复误当作本轮输出返回。捕获时调用 `log("info", "baseline captured", ...)`，渲染后形态为 `[feishu] baseline captured`（`[feishu]` 前缀由 `src/index.ts` 的 `LOG_PREFIX` 自动添加，源码中**勿手动加**），含 `sessionKey` / `sessionId` / `fetchSuccess` / `hasBaseline` / `textLen` / `reasoningLen`，用于事后验证修复是否生效。
+
+**event.ts** — SSE 事件分发与状态缓存
+- `handleEvent()` 接收 OpenCode 事件，按类型分发：`message.part.updated` 更新占位消息或卡片，`permission.asked` / `question.asked` / `session.idle` 转发到 action-bus
+- 维护 `pendingBySession` 映射（sessionId → 占位消息上下文），管理 `expectedMessageId` 首条 SSE 锁防止事件串线
+- 缓存 `sessionErrors`（30s TTL，含 raw error 对象）和 `retryAttempts` 计数器，供 chat.ts 和 error-recovery.ts 消费
+
+**session-queue.ts** — per-sessionKey FIFO 串行队列
+- 按 sessionKey 归并消息，同一逻辑会话内严格串行消费，防止占位消息/流式卡片并发覆盖
+- `enqueueMessage()` 是唯一入口；`shouldReply=false` 的静默消息直接透传，不占用队列
+- 队列空闲时自动回收状态对象，避免长时间运行后空壳条目积累
+
+**action-bus.ts** — per-session 轻量事件总线
+- `subscribe(sessionId, cb)` 注册订阅，返回幂等的 unsubscribe 函数；最后一个订阅者移除后清理空集合
+- `emit(sessionId, action)` fire-and-forget 广播，单个订阅者抛错不阻塞其他订阅者也不打断主流程
+- `ProcessedAction` 联合类型覆盖 7 种事件：text-updated、details-updated、tool-state-changed、permission-requested、question-requested、session-idle、assistant-meta-updated
+
+**interactive.ts** — 权限/问答交互卡片与按钮回调
+- `handlePermissionRequested()` / `handleQuestionRequested()` 使用 `buildCardFromDSL` 构建交互卡片并发送到飞书，`seenIds` TtlMap 防止重复发送
+- `handleCardAction()` 解析卡片按钮回调 value → 路由到 v2Client 的 permission / question / abort reply；spec 031 扩展了 `ParsedCardActionValue` 联合（新增 `FormSubmitActionValue` 第 5 种 action）和 `normalizeFormValue` / `validateChatScopeForFormSubmit` 辅助函数
+- `buildCallbackResponse()` 返回 toast 即时反馈（飞书 3 秒约束），abort 按钮通过 reply-run-registry 管理取消流程
+- `buildFormSubmitPrompt()` 构造 form_submit 的结构化 prompt 前缀（FR-018 + FR-020a），含 displayName 解析 + JSON 包装
+
+**pending-forms.ts** — 阻塞型 feishu_request_form tool 的全局注册表
+- `PendingForm` interface（formName / sessionId / chatId / createdAt / resolver）+ `FormSubmitResult` interface（formValue / operatorId / timezone / callbackChatId）
+- `registerPendingForm()` / `unregisterPendingForm()` 注册和清理
+- `resolvePendingForm()` 三路 race 的核心：chatId 跨群拒收（EC-024）→ resolver 触发 → 返回 boolean 供 gateway 判定 P3 命中或 P1 fallback
+- TtlMap 自动过期（MAX_FORM_TIMEOUT_SECONDS = 1800s 兜底）
+
+**errors.ts** — 错误分类（typed discriminated union）
+- `classify(raw): PluginError` 纯函数，按优先级链判定：Auth → Context → Model → Poison → fallback
+- `matchPluginError(err, handlers)` exhaustive matcher，漏 kind 直接编译报错
+- `toLog(err)` 安全日志 payload，不暴露 raw（防 secrets 泄漏）
+- `PluginErrorThrown` nominal wrapper，仅 throw/catch 边界使用
+- 类型：`PluginError`（5 kinds）、`Evidence[]`、`RuleName`、`FieldPath`
+
+**error-recovery.ts** — 模型错误自动恢复
+- `tryModelRecovery()` 接收已分类的 `PluginError & { kind: "ModelUnavailable" }`，用全局默认模型自动重试（每 sessionKey 上限 2 次，成功后重置计数）
+- `SessionErrorDetected` 专用异常类，使轮询期间发现的 SSE 错误与普通异常可区分
+- `extractSessionError()` 从异常或 SSE 缓存中提取结构化错误，取到后立即清理缓存避免污染下一轮调用
+
+**reply-run-registry.ts** — run 生命周期状态机与 abort 支持
+- 管理 `ActiveReplyRun` 对象的创建、状态流转（starting → running → completing → completed/failed/timed_out/aborted）和 TTL 自动清理
+- 通过 `activeBySessionKey` / `runsByRunId` / `runsBySessionId` 三张 TtlMap 提供多维度查找
+- `requestAbortForRun()` 设置 abort 请求并切换状态到 aborting，`confirmAbortForRun()` / `resetAbortForRun()` 处理确认和回滚
+- 每个 run 持有独立的 `AbortController`，`getRunAbortSignal()` 供轮询等可取消路径消费
+
+## 会话错误处理（五层架构）
+
+| 层 | 位置 | 职责 |
+|----|------|------|
+| L1 | event.ts | 从 `session.error` 提取错误消息 + raw error，缓存到 sessionErrors（30s TTL） |
+| L2 | chat.ts pollForResponse | 每次轮询检查 SSE 缓存的错误，检测到立即终止 |
+| L3 | error-recovery.ts | `classify()` 判定 `ModelUnavailable` 时用全局默认模型重试（每 sessionKey 上限 2 次） |
+| L4 | session-queue.ts | per-sessionKey FIFO 防止消息竞态 |
+| L5 | event.ts | expectedMessageId 防止事件串扰 |
+
+错误消息统一由 chat.ts catch 块发送给用户（event.ts 不发送，避免双重发送）。
+
+**L1** event.ts 缓存 raw error 对象 + 提取消息字符串。`classify()` 在 chat.ts catch 块中消费 raw error，按优先级链判定 kind。
+
+**L2** `pollForResponse()` 每次轮询检查 SSE 缓存错误，检测到立即终止（~1s 内）。
+
+**错误分类规则优先级**（`errors.ts` classify 链）：
+
+| 优先级 | 规则函数 | 命中条件 | 证据强度 |
+|-------|---------|---------|---------|
+| 1 | `tryUnauthorized` | `raw.name === "ProviderAuthError"` | ⭐⭐⭐ 强 |
+| 2 | `tryContextOverflow` | `raw.name === "ContextOverflowError"` | ⭐⭐⭐ 强 |
+| 3 | `tryModelUnavailable` | `raw.name === "ProviderModelNotFoundError"` OR `UnknownError` + pattern | ⭐⭐ 中 |
+| 4 | `trySessionPoisoned` | `raw.name` ∈ 白名单 AND `data.message` matches pattern（two-factor） | ⭐ 弱 |
+| ∞ | fallback | 其余 → `UnknownUpstream` | — |
+
+**中毒恢复**：`classify()` 判定 `SessionPoisoned` 后，chat.ts 调 `invalidateSession(sessionKey)`——仅清本地缓存 + 置 `forceCreateSession` 标记；下一条用户消息触发 `client.session.create()` 开**全新空白** session（**不 fork，不保留历史**）。旧 session 在 server 上仍存在但插件不再引用。历史记录丢失是有意权衡：fork 会复制中毒历史导致死循环。
+
+**L3 模型恢复**：`tryModelRecovery()` 接收已分类的 `PluginError & { kind: "ModelUnavailable" }`，用 `getGlobalDefaultModel()` 读 `Config.model` 做重试（每 sessionKey 最多 `MAX_RETRY_ATTEMPTS=2` 次）。注意：**继续用原 session**，不换 session——这和中毒恢复是两条独立路径。**不 re-classify**（FR-011）。
+
+**L4** per-sessionKey FIFO 串行排队，静默消息绕过队列。
+
+**L5** `expectedMessageId` 首条锁，后续不匹配事件静默丢弃。
+
+### 如何扩展错误类型
+
+1. 在 `errors.ts` 加新 kind 到 `PluginError` union
+2. 在 `errors.ts` 加对应 try* 规则函数，插入 `classify` 优先级链的正确位置
+3. 跑 `npm run typecheck`，按编译错误逐个补齐 consumer 的 matchPluginError handlers
+4. 加 `RuleName` / `FieldPath` 新成员（如需要）
+5. 更新本文件的规则优先级表
+
+## 隐性跨文件契约
+
+以下契约不靠类型强保证，修改任一侧必须同步另一侧，否则是静默 bug：
+
+### `mirrorTextToMessage`（chat.ts 写 / event.ts 读）
+
+- CardKit 不可用或 `StreamingCard.start()` 失败时，`chat.ts` 立即发一条纯文本”正在思考…”占位消息。
+- 该占位走 `registerPending({ placeholderId, feishuClient, mirrorTextToMessage: true })` 注册到 pending 表。
+- `event.ts` 处理 `message.part.updated` 时读该 flag：`true` 直接更新飞书文本消息；否则走 `streamingCard` 卡片更新。
+- 改 `chat.ts` 的 fallback 注册逻辑必须同步检查 `event.ts` 的 mirror 分支；反之亦然。该路径无法承载 abort 按钮，是有意的降级代价。
+
+### `expectedMessageId` 首条 SSE 锁（event.ts 内部契约）
+
+- `registerPending` 初始 `expectedMessageId` 为 `undefined`。
+- 首个 `message.part.updated` 事件到达时把 `part.messageID` 写入 `expectedMessageId`。
+- 之后所有 messageID 不匹配的事件**静默丢弃**，防止同一 session 内多 run 事件串线到当前卡片。
+- 依赖：`session-queue.ts` 的 per-sessionKey FIFO 串行保证首个事件属于当前 run。改队列或 pending 生命周期时必须保留“首锁 + 后过滤”语义。
+
+## 反模式修复回归原则（toast / async fire-and-forget）
+
+修一处反模式（如 `interactive.ts` 中"toast 完成态 + v2Client async fire-and-forget"）后，必须**按结构而非文案**扫描所有同构兄弟。grep 文案（"已发送"/"已收到"）只能命中已知 caller，无法发现结构相同但语义不同的兄弟（如 `permission_reply` / `question_reply` / `abort_reply`）。
+
+实例：v1.10.5 PR #74 修复 F21 send_message + form_submit 的 toast 矛盾信号，但漏扫 3 处同构反模式（v1.10.6 PR-A 补修）。
+
+**修反模式 PR 必须配同构扫描清单**：
+
+1. `void deps.v2Client.*.then().catch(...)` 的所有 caller：toast 必须是进行态（`type: "info"`）
+2. 失败处理是否仅 `emitPhase("error")` / log 而无对等用户面提示：列入待补救
+3. 不写"反模式清零"声明；改写"已修 X / Y / Z 三处实例，结构同构扫描已完成"
+
+详细规则与历史背景见本地 `docs/fallback-design-rules.md § 11`（不入 git，仅作 Claude review 必读输入）。
