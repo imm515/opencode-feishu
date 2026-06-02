@@ -269,7 +269,13 @@ async function main(): Promise<void> {
     info("Received " + sig + ", shutting down")
     clearInterval(interval)
     closeDb()
-    try { unlinkSync(lockFile) } catch {}
+    try {
+      const currentPid = parseInt(readFileSync(lockFile, "utf-8").trim(), 10)
+      if (currentPid === process.pid) {
+        unlinkSync(lockFile)
+        info("Lock released")
+      }
+    } catch {}
     process.exit(0)
   }
   process.on("SIGINT", () => shutdown("SIGINT"))
@@ -278,7 +284,14 @@ async function main(): Promise<void> {
   process.on("unhandledRejection", (r) => error("unhandled", { r: String(r) }))
 
   await poll()
-  if (ONE_SHOT) { info("--once, exiting"); try { unlinkSync(lockFile) } catch {}; process.exit(0) }
+  if (ONE_SHOT) {
+    info("--once, exiting")
+    try {
+      const currentPid = parseInt(readFileSync(lockFile, "utf-8").trim(), 10)
+      if (currentPid === process.pid) unlinkSync(lockFile)
+    } catch {}
+    process.exit(0)
+  }
   info("Daemon running, polling every " + POLL_INTERVAL_MS + "ms")
 }
 
