@@ -124,8 +124,23 @@ async function poll(): Promise<void> {
       if (isStartup) {
         const letP = await getLatestPartTime(session.id)
         debug("[active:prime] " + title + " latestPartTime=" + letP)
+
+        // Seed lastDoneTime = now for sessions that already have step-finish(stop)
+        // This prevents 5-min timeout from immediately firing on restart
+        const startSeed = await getLatestPartInfo(session.id)
         markSeen(state, session.id, letP, "", 0)
+        if (startSeed && startSeed.type === "step-finish" && startSeed.reason === "stop") {
+          state[session.id].lastDoneTime = Date.now()
+        }
         continue
+      }
+
+      // Seed lastDoneTime on first encounter after daemon restart
+      if (!prev?.lastDoneTime) {
+        const seedPart = await getLatestPartInfo(session.id)
+        if (seedPart && seedPart.type === "step-finish" && seedPart.reason === "stop") {
+          state[session.id].lastDoneTime = Date.now()
+        }
       }
 
       const latest = await getLatestAssistantPart(session.id)
@@ -189,6 +204,38 @@ async function poll(): Promise<void> {
 
       if (!hasNew) {
         markSeen(state, session.id, latestTime, "", 0)
+      }
+
+      // Timeout-based done fallback: step-finish(stop) + 5 min idle = done
+      const latestPart = await getLatestPartInfo(session.id)
+      if (latestPart && latestPart.type === "step-finish" && latestPart.reason === "stop" && latestPart.time_created > DAEMON_STARTED_AT) {
+        const idleMs = Date.now() - latestPart.time_created
+        const lastDone = getEntry(state, session.id)?.lastDoneTime ?? 0
+        const sinceLastDone = Date.now() - lastDone
+        if (idleMs >= DONE_IDLE_TIMEOUT_MS && sinceLastDone >= DONE_IDLE_TIMEOUT_MS) {
+          const latestTextForDone = latestText || ((await getLatestAssistantPart(session.id))?.text ?? "")
+          try {
+            debug("[active:push:done:idle] " + title + " idleMs=" + idleMs + " sinceLastDone=" + sinceLastDone)
+            if (!DRY_RUN) {
+              await sendNotify({
+                appId: config.appId,
+                appSecret: config.appSecret,
+                sessionId: session.id,
+                sessionTitle: session.title,
+                kind: "done",
+                text: latestTextForDone || null,
+                archiveTime: latestPart.time_created,
+                textTime: latestPart.time_created,
+              })
+            }
+            recordDone(state, session.id, Date.now())
+            pushes++
+            detailLines.push("done: " + title)
+            markSeen(state, session.id, latestPart.time_created, "", 0)
+          } catch (err) {
+            error("done idle push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
+          }
+        }
       }
     }
   }

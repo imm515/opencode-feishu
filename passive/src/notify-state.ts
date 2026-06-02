@@ -70,13 +70,13 @@ export function recordPush(
   partTime: number,
   archiveTime: number,
 ): void {
-  const prev = map[sessionId]
+  const cur = map[sessionId]
   map[sessionId] = {
     lastSeenTime: partTime,
     lastSeenText: text,
     lastSeenArchiveTime: archiveTime,
     lastPushedAt: Date.now(),
-    lastDoneTime: prev?.lastDoneTime ?? 0,
+    lastDoneTime: cur?.lastDoneTime ?? 0,
   }
 }
 
@@ -87,13 +87,13 @@ export function markSeen(
   text: string,
   archiveTime: number,
 ): void {
-  const prev = map[sessionId]
+  const cur = map[sessionId]
   map[sessionId] = {
-    lastSeenTime: partTime > (prev?.lastSeenTime ?? 0) ? partTime : (prev?.lastSeenTime ?? 0),
+    lastSeenTime: partTime > (cur?.lastSeenTime ?? 0) ? partTime : (cur?.lastSeenTime ?? 0),
     lastSeenText: text,
-    lastSeenArchiveTime: archiveTime || (prev?.lastSeenArchiveTime ?? 0),
-    lastPushedAt: prev?.lastPushedAt ?? Date.now(),
-    lastDoneTime: prev?.lastDoneTime ?? 0,
+    lastSeenArchiveTime: archiveTime || (cur?.lastSeenArchiveTime ?? 0),
+    lastPushedAt: cur?.lastPushedAt ?? Date.now(),
+    lastDoneTime: cur?.lastDoneTime ?? 0,
   }
 }
 
