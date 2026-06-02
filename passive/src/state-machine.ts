@@ -38,6 +38,26 @@ export function detectAiStateFromParts(parts: PartRow[]): AiState {
   return partToState(last.type, last.state_status)
 }
 
+export function detectSessionState(parts: PartRow[], isArchived: boolean): AiState {
+  if (isArchived) return "done"
+  return detectAiStateFromParts(parts)
+}
+
+export type Transition =
+  | "any→waiting"
+  | "any→working"
+  | "any→done"
+  | null
+
+export function detectTransition(prev: AiState | null, curr: AiState): Transition {
+  if (prev === curr) return null
+  if (prev === null) {
+    if (curr === "waiting" || curr === "done") return `any→${curr}` as Transition
+    return null
+  }
+  return `any→${curr}` as Transition
+}
+
 export function formatStateEmoji(state: AiState): string {
   switch (state) {
     case "working": return "🔄"

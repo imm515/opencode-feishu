@@ -61,6 +61,42 @@ export async function getActiveSessions(): Promise<Session[]> {
   return rowsToObjects(results[0]) as unknown as Session[]
 }
 
+export async function getRecentlyArchivedSessions(graceMs: number): Promise<Session[]> {
+  const db = await getDb()
+  const cutoff = Date.now() - graceMs
+  const results = db.exec(`
+    SELECT id, title, time_created, time_updated, time_archived
+    FROM session
+    WHERE time_archived > ${cutoff}
+    ORDER BY time_archived DESC
+  `)
+  if (!results.length) return []
+  return rowsToObjects(results[0]) as unknown as Session[]
+}
+
+export interface TextPart {
+  text: string
+  time_created: number
+}
+
+export async function getLastTextPart(sessionId: string): Promise<TextPart | null> {
+  const db = await getDb()
+  const results = db.exec(`
+    SELECT
+      json_extract(data, '$.text') AS text,
+      time_created
+    FROM part
+    WHERE session_id = '${sessionId.replace(/'/g, "''")}'
+      AND json_extract(data, '$.type') = 'text'
+    ORDER BY time_created DESC
+    LIMIT 1
+  `)
+  if (!results.length || !results[0].values.length) return null
+  const [text, time_created] = results[0].values[0] as [string | null, number]
+  if (!text) return null
+  return { text, time_created }
+}
+
 export async function getSessionParts(sessionId: string): Promise<PartRow[]> {
   const db = await getDb()
   const results = db.exec(`

@@ -8,7 +8,7 @@ export type SectionInput =
 export interface CardArgs {
   title: string
   template?: "blue" | "green" | "orange" | "red" | "purple" | "grey"
-  sections: readonly SectionInput[]
+  sections: SectionInput[]
 }
 
 export function buildCardFromDSL(args: CardArgs): object {
