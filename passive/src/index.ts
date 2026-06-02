@@ -3,7 +3,6 @@ import {
   getActiveSessions,
   getRecentlyArchivedSessions,
   getLatestAssistantPart,
-  getLatestPartInfo,
   getLatestPartTime,
   closeDb,
   refreshDb,
@@ -13,12 +12,11 @@ import {
   loadNotifiedState,
   saveNotifiedState,
   recordPush,
-  recordDone,
   markSeen,
   getEntry,
 } from "./notify-state.js"
 import { info, error, debug, logPoll, setVerbose } from "./logger.js"
-import { readFileSync } from "node:fs"
+import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs"
 import { PKG_FILE } from "./paths.js"
 
 const ARCHIVE_GRACE_MS = 5 * 60 * 1000
@@ -82,6 +80,15 @@ async function poll(): Promise<void> {
           debug("[arch:prime] " + title + " archiveTime=" + archiveTime + " latestPartTime=" + latestPartTime)
           markSeen(state, session.id, latestPartTime, "", archiveTime)
         } else {
+          // === DEDUP: re-read state to check if another instance already pushed archive ===
+          const freshState = loadNotifiedState()
+          const freshEntry = getEntry(freshState, session.id)
+          if (freshEntry && freshEntry.lastSeenArchiveTime >= archiveTime) {
+            debug("[arch:skip:dedup] " + title + " another instance already pushed archiveTime=" + archiveTime)
+            markSeen(state, session.id, freshEntry.lastSeenTime, "", archiveTime)
+            continue
+          }
+
           try {
             const latest = await getLatestAssistantPart(session.id)
             const latestText = latest?.text ?? ""
@@ -142,6 +149,15 @@ async function poll(): Promise<void> {
       let latestText = ""
 
       if (hasNew && latest.text.trim()) {
+        // === DEDUP: re-read state to check if another instance already pushed ===
+        const freshState = loadNotifiedState()
+        const freshEntry = getEntry(freshState, session.id)
+        if (freshEntry && freshEntry.lastSeenTime >= latestTime) {
+          debug("[active:skip:dedup] " + title + " another instance already pushed latestTime=" + latestTime)
+          markSeen(state, session.id, latestTime, "", 0)
+          continue
+        }
+
         // === PUSH REPLY ===
         latestText = latest.text
         try {
@@ -166,42 +182,6 @@ async function poll(): Promise<void> {
       } else if (hasNew) {
         debug("[active:skip:empty] " + title + " latestTime=" + latestTime + " text is empty")
         markSeen(state, session.id, latestTime, "", 0)
-      }
-
-      // === DONE DETECTION: step-finish(reason=stop) ===
-      const lastDoneTime = prev?.lastDoneTime ?? 0
-      const partInfo = await getLatestPartInfo(session.id)
-      if (partInfo && partInfo.type === "step-finish" && partInfo.reason === "stop" && partInfo.time_created > lastDoneTime) {
-        // Only push done if the step-finish is after the last text we pushed
-        const doneTime = partInfo.time_created
-        if (doneTime > prevTime) {
-          if (!latestText) {
-            const latestPart = await getLatestAssistantPart(session.id)
-            latestText = latestPart?.text ?? ""
-          }
-          try {
-            debug("[active:PUSH:done] " + title + " doneTime=" + doneTime + " textLen=" + latestText.length)
-            if (!DRY_RUN) {
-              await sendNotify({
-                appId: config.appId,
-                appSecret: config.appSecret,
-                sessionId: session.id,
-                sessionTitle: session.title,
-                kind: "done",
-                text: latestText || null,
-                textTime: doneTime,
-                archiveTime: doneTime,
-              })
-            }
-            recordDone(state, session.id, doneTime)
-            pushes++
-            detailLines.push("done: " + title)
-          } catch (err) {
-            error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
-          }
-        } else {
-          debug("[active:skip:done:old] " + title + " doneTime=" + doneTime + " <= prevTime=" + prevTime)
-        }
       }
 
       if (!hasNew) {
@@ -251,6 +231,32 @@ async function main(): Promise<void> {
     process.exit(2)
   }
 
+  // Single-instance lock via exclusive file create (OS-atomic on Windows)
+  const lockFile = ".passive.lock"
+  function acquireLock(): boolean {
+    try {
+      const fd = openSync(lockFile, "wx")
+      writeFileSync(fd, String(process.pid))
+      closeSync(fd)
+      return true
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+      return false
+    }
+  }
+  if (!acquireLock()) {
+    try {
+      const existingPid = parseInt(readFileSync(lockFile, "utf-8").trim(), 10)
+      if (!isNaN(existingPid)) {
+        try { process.kill(existingPid, 0); info("Another daemon (PID " + existingPid + ") is running, exiting"); process.exit(0) }
+        catch { /* stale lock */ }
+      }
+    } catch { /* skip */ }
+    unlinkSync(lockFile)
+    if (!acquireLock()) { error("Cannot acquire lock even after removing stale file"); process.exit(3) }
+  }
+  info("Lock acquired, PID " + process.pid)
+
   const interval = setInterval(async () => {
     try { await poll() }
     catch (err) { error("Poll error", { e: err instanceof Error ? err.message : String(err) }) }
@@ -260,6 +266,7 @@ async function main(): Promise<void> {
     info("Received " + sig + ", shutting down")
     clearInterval(interval)
     closeDb()
+    try { unlinkSync(lockFile) } catch {}
     process.exit(0)
   }
   process.on("SIGINT", () => shutdown("SIGINT"))
@@ -268,7 +275,7 @@ async function main(): Promise<void> {
   process.on("unhandledRejection", (r) => error("unhandled", { r: String(r) }))
 
   await poll()
-  if (ONE_SHOT) { info("--once, exiting"); process.exit(0) }
+  if (ONE_SHOT) { info("--once, exiting"); try { unlinkSync(lockFile) } catch {}; process.exit(0) }
   info("Daemon running, polling every " + POLL_INTERVAL_MS + "ms")
 }
 

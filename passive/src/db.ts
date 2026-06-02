@@ -55,22 +55,6 @@ export async function getLatestPartTime(sessionId: string): Promise<number> {
   return row?.max_time ?? 0
 }
 
-export interface PartInfo {
-  time_created: number
-  type: string
-  reason: string
-}
-
-export async function getLatestPartInfo(sessionId: string): Promise<PartInfo | null> {
-  const db = getDb()
-  const stmt = db.prepare(
-    "SELECT p.time_created, json_extract(p.data, '$.type') AS type, json_extract(p.data, '$.reason') AS reason " +
-    "FROM part AS p WHERE p.session_id = ? ORDER BY p.time_created DESC LIMIT 1"
-  )
-  const row = stmt.get(sessionId) as PartInfo | undefined
-  return row ?? null
-}
-
 export async function getLatestAssistantPart(sessionId: string): Promise<LatestPartInfo | null> {
   const db = getDb()
   const stmt = db.prepare(
