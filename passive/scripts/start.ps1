@@ -1,12 +1,12 @@
 # opencode-feishu passive monitor — start daemon
-# Direct node.exe spawn (no cmd.exe wrapper), captures the actual node PID.
+# Uses tsx to run TypeScript directly (no build step needed).
 # Idempotent: if already running, prints existing PID and exits 0.
 
 $ErrorActionPreference = "Stop"
 
 $scriptRoot   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $passiveRoot  = Resolve-Path (Join-Path $scriptRoot "..")
-$distEntry    = Join-Path $passiveRoot "dist\index.js"
+$srcEntry     = Join-Path $passiveRoot "src\index.ts"
 $logDir       = Join-Path $passiveRoot "logs"
 $pidFile      = Join-Path $passiveRoot ".passive.pid"
 $outLog       = Join-Path $logDir "passive.out.log"
@@ -14,22 +14,20 @@ $errLog       = Join-Path $logDir "passive.err.log"
 
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
-function Get-NodePath {
-    $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
+function Get-TsxPath {
+    $cmd = Get-Command tsx.exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Path }
-    $candidates = @(
-        "C:\Program Files\nodejs\node.exe",
-        "D:\Program Files\nodejs\node.exe"
-    )
-    foreach ($p in $candidates) { if (Test-Path $p) { return $p } }
-    throw "node.exe not found in PATH or $candidates"
+    # Try npx fallback
+    $npx = Get-Command npx.exe -ErrorAction SilentlyContinue
+    if ($npx) { return "npx tsx" }
+    throw "tsx not found — run: npm install -g tsx"
 }
 
 function Find-AllDaemonPids {
     $pids = @()
-    $processes = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
     foreach ($p in $processes) {
-        if ($p.CommandLine -match 'dist[\\/]index\.js') {
+        if ($p.CommandLine -match '(tsx|node)[\\/]src[\\/]index\.ts|dist[\\/]index\.js') {
             $pids += $p.ProcessId
         }
     }
@@ -72,31 +70,27 @@ if ($orphanPids.Count -gt 0) {
     exit 0
 }
 
-if (-not (Test-Path $distEntry)) {
-    Write-Host "[error] dist\index.js not found at $distEntry — run 'npm run build' first"
+if (-not (Test-Path $srcEntry)) {
+    Write-Host "[error] $srcEntry not found"
     exit 2
 }
 
-$nodePath = Get-NodePath
+$tsxPath = Get-TsxPath
 
-Write-Host "[start] $nodePath"
+Write-Host "[start] $tsxPath"
 Write-Host "[cwd]   $passiveRoot"
-Write-Host "[entry] $distEntry"
-Write-Host "[out]   $outLog"
-Write-Host "[err]   $errLog"
+Write-Host "[entry] $srcEntry"
 
-$proc = Start-Process -FilePath $nodePath `
-    -ArgumentList "`"$distEntry`"" `
+$proc = Start-Process -FilePath ($tsxPath.Split(" ")[0]) `
+    -ArgumentList "$($tsxPath.Split(" ")[1..99] -join ' ') `"$srcEntry`"" `
     -WorkingDirectory $passiveRoot `
-    -RedirectStandardOutput $outLog `
-    -RedirectStandardError  $errLog `
     -WindowStyle Hidden `
     -PassThru
 
 $nodePid = $proc.Id
 [System.IO.File]::WriteAllText($pidFile, "$nodePid")
 
-Write-Host "[ok] node started as PID $nodePid"
+Write-Host "[ok] daemon started as PID $nodePid"
 
 Start-Sleep -Seconds 2
 
@@ -105,10 +99,7 @@ if ($check) {
     Write-Host "[verified] PID $nodePid alive at $(Get-Date -Format 'HH:mm:ss')"
     exit 0
 } else {
-    Write-Host "[fail] node exited within 2s — see $errLog"
-    if (Test-Path $errLog) {
-        Get-Content $errLog | Select-Object -Last 20 | ForEach-Object { Write-Host "  $_" }
-    }
+    Write-Host "[fail] daemon exited within 2s — check logs"
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
     exit 1
 }
