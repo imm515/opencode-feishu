@@ -172,7 +172,6 @@ async function poll(): Promise<void> {
         // === PUSH REPLY ===
         latestText = latest.text
         try {
-          debug("[active:PUSH:reply] " + title + " partTime=" + latestTime + " textLen=" + latestText.length)
           if (!DRY_RUN) {
             await sendNotify({
               appId: config.appId,
