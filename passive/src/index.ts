@@ -3,6 +3,7 @@ import {
   getActiveSessions,
   getRecentlyArchivedSessions,
   getLatestAssistantPart,
+  getLatestPartInfo,
   getLatestPartTime,
   closeDb,
   refreshDb,
@@ -12,6 +13,7 @@ import {
   loadNotifiedState,
   saveNotifiedState,
   recordPush,
+  recordDone,
   markSeen,
   getEntry,
 } from "./notify-state.js"
@@ -20,6 +22,7 @@ import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "no
 import { PKG_FILE } from "./paths.js"
 
 const ARCHIVE_GRACE_MS = 5 * 60 * 1000
+const DONE_IDLE_TIMEOUT_MS = 5 * 60 * 1000
 
 const DRY_RUN = process.argv.includes("--dry-run")
 const ONE_SHOT = process.argv.includes("--once")
