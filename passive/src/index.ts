@@ -16,6 +16,8 @@ import {
   recordDone,
   markSeen,
   getEntry,
+  setPendingDone,
+  clearPendingDone,
 } from "./notify-state.js"
 import { info, error, debug, logPoll, setVerbose } from "./logger.js"
 import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs"
@@ -197,38 +199,53 @@ async function poll(): Promise<void> {
         markSeen(state, session.id, latestTime, "", 0)
       }
 
-      if (!hasNew) {
-        markSeen(state, session.id, latestTime, "", 0)
-      }
-
-      // Done detection: latest step-finish(reason=stop) in any position
+      // Done detection: debounce by one poll cycle (20s)
       const stopTime = await getLatestStepFinishStopTime(session.id)
-      if (stopTime > DAEMON_STARTED_AT) {
-        const lastDone = getEntry(state, session.id)?.lastDoneTime ?? 0
-        if (stopTime > lastDone) {
-          const latestTextForDone = latestText || ((await getLatestAssistantPart(session.id))?.text ?? "")
-          try {
-            debug("[active:PUSH:done] " + title + " stopTime=" + stopTime)
-            if (!DRY_RUN) {
-              await sendNotify({
-                appId: config.appId,
-                appSecret: config.appSecret,
-                sessionId: session.id,
-                sessionTitle: session.title,
-                kind: "done",
-                text: latestTextForDone || null,
-                archiveTime: stopTime,
-                textTime: stopTime,
-              })
+      const curEntry = getEntry(state, session.id)
+      const lastDone = curEntry?.lastDoneTime ?? 0
+      const pendingDone = curEntry?.pendingDoneTime ?? 0
+
+      if (stopTime > DAEMON_STARTED_AT && stopTime > lastDone) {
+        // Check pending from previous poll
+        if (pendingDone) {
+          if (stopTime > pendingDone) {
+            // Newer stop appeared — update pending
+            setPendingDone(state, session.id, stopTime)
+            debug("[active:pending:updated] " + title + " stopTime=" + stopTime)
+          } else {
+            // Same stop, no new activity — fire done
+            const latestTextForDone = latestText || ((await getLatestAssistantPart(session.id))?.text ?? "")
+            try {
+              debug("[active:PUSH:done] " + title + " stopTime=" + stopTime)
+              if (!DRY_RUN) {
+                await sendNotify({
+                  appId: config.appId,
+                  appSecret: config.appSecret,
+                  sessionId: session.id,
+                  sessionTitle: session.title,
+                  kind: "done",
+                  text: latestTextForDone || null,
+                  archiveTime: stopTime,
+                  textTime: stopTime,
+                })
+              }
+              recordDone(state, session.id, stopTime)
+              pushes++
+              detailLines.push("done: " + title)
+              markSeen(state, session.id, stopTime, "", 0)
+            } catch (err) {
+              error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
             }
-            recordDone(state, session.id, stopTime)
-            pushes++
-            detailLines.push("done: " + title)
-            markSeen(state, session.id, stopTime, "", 0)
-          } catch (err) {
-            error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
           }
+        } else {
+          // First detection — set pending, wait one cycle
+          setPendingDone(state, session.id, stopTime)
+          debug("[active:pending:set] " + title + " stopTime=" + stopTime + " will fire next poll if no new content")
         }
+      } else if (pendingDone && stopTime <= lastDone) {
+        // Stop already done — clear stale pending
+        clearPendingDone(state, session.id)
+        debug("[active:pending:cleared] " + title + " stopTime=" + stopTime + " already done")
       }
     }
   }

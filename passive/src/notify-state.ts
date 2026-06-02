@@ -9,6 +9,7 @@ export interface SessionTrackEntry {
   lastSeenArchiveTime: number
   lastPushedAt: number
   lastDoneTime: number
+  pendingDoneTime: number
 }
 
 export type NotifiedMap = Record<string, SessionTrackEntry> & {
@@ -77,6 +78,7 @@ export function recordPush(
     lastSeenArchiveTime: archiveTime,
     lastPushedAt: Date.now(),
     lastDoneTime: cur?.lastDoneTime ?? 0,
+    pendingDoneTime: 0,
   }
 }
 
@@ -94,11 +96,29 @@ export function markSeen(
     lastSeenArchiveTime: archiveTime || (cur?.lastSeenArchiveTime ?? 0),
     lastPushedAt: cur?.lastPushedAt ?? Date.now(),
     lastDoneTime: cur?.lastDoneTime ?? 0,
+    pendingDoneTime: cur?.pendingDoneTime ?? 0,
   }
 }
 
 export function getEntry(map: NotifiedMap, sessionId: string): SessionTrackEntry | null {
   return map[sessionId] ?? null
+}
+
+export function setPendingDone(
+  map: NotifiedMap,
+  sessionId: string,
+  stopTime: number,
+): void {
+  const cur = map[sessionId]
+  if (cur) cur.pendingDoneTime = stopTime
+}
+
+export function clearPendingDone(
+  map: NotifiedMap,
+  sessionId: string,
+): void {
+  const cur = map[sessionId]
+  if (cur) cur.pendingDoneTime = 0
 }
 
 export function recordDone(
@@ -113,5 +133,6 @@ export function recordDone(
     lastSeenArchiveTime: prev?.lastSeenArchiveTime ?? 0,
     lastPushedAt: prev?.lastPushedAt ?? Date.now(),
     lastDoneTime: doneTime,
+    pendingDoneTime: 0,
   }
 }
