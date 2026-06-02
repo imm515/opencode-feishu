@@ -1,8 +1,10 @@
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
 import { info, error } from "./logger.js"
 import { sendInteractiveCard } from "./sender.js"
 import { buildCardFromDSL, type CardArgs, type CardTemplate } from "./card-dsl.js"
 import { CHAT_ID } from "./config.js"
 import { truncateMarkdown } from "./markdown.js"
+import { LOG_DIR } from "./paths.js"
 
 const THREAD_TEMPLATES: { template: CardTemplate }[] = [
   { template: "blue" },
@@ -13,6 +15,40 @@ const THREAD_TEMPLATES: { template: CardTemplate }[] = [
   { template: "red" },
 ]
 
+const COLOR_FILE = LOG_DIR + "/session-colors.json"
+const COLOR_MAX_AGE = 7 * 24 * 60 * 60 * 1000
+
+interface ColorStore {
+  [sessionId: string]: { template: CardTemplate; updatedAt: number }
+}
+
+let _colorStore: ColorStore | null = null
+
+function loadColorStore(): ColorStore {
+  if (_colorStore) return _colorStore
+  if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true })
+  try {
+    const raw = JSON.parse(readFileSync(COLOR_FILE, "utf-8")) as ColorStore
+    _colorStore = raw
+  } catch {
+    _colorStore = {}
+  }
+  return _colorStore
+}
+
+function saveColorStore(): void {
+  if (!_colorStore) return
+  const now = Date.now()
+  for (const k of Object.keys(_colorStore)) {
+    if (now - (_colorStore[k]?.updatedAt ?? 0) > COLOR_MAX_AGE) {
+      delete _colorStore[k]
+    }
+  }
+  try {
+    writeFileSync(COLOR_FILE, JSON.stringify(_colorStore, null, 2), "utf-8")
+  } catch { /* skip */ }
+}
+
 function hashSession(sessionId: string): number {
   let hash = 0
   for (const ch of sessionId) {
@@ -21,8 +57,19 @@ function hashSession(sessionId: string): number {
   return hash
 }
 
-function threadTemplate(sessionId: string): CardTemplate {
+function pickTemplate(sessionId: string): CardTemplate {
   return THREAD_TEMPLATES[hashSession(sessionId) % THREAD_TEMPLATES.length].template
+}
+
+export function threadTemplate(sessionId: string): CardTemplate {
+  const store = loadColorStore()
+  const existing = store[sessionId]
+  if (existing) return existing.template
+  const t = pickTemplate(sessionId)
+  store[sessionId] = { template: t, updatedAt: Date.now() }
+  saveColorStore()
+  info("[color] assign " + t + " to " + sessionId.slice(0, 18))
+  return t
 }
 
 export type PushKind = "reply" | "done"
