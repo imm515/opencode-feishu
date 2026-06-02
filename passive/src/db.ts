@@ -55,20 +55,15 @@ export async function getLatestPartTime(sessionId: string): Promise<number> {
   return row?.max_time ?? 0
 }
 
-export interface PartInfo {
-  time_created: number
-  type: string
-  reason: string
-}
-
-export async function getLatestPartInfo(sessionId: string): Promise<PartInfo | null> {
+export async function getLatestStepFinishStopTime(sessionId: string): Promise<number> {
   const db = getDb()
   const stmt = db.prepare(
-    "SELECT p.time_created, json_extract(p.data, '$.type') AS type, json_extract(p.data, '$.reason') AS reason " +
-    "FROM part AS p WHERE p.session_id = ? ORDER BY p.time_created DESC LIMIT 1"
+    "SELECT MAX(time_created) AS max_time FROM part " +
+    "WHERE session_id = ? AND json_extract(data, '$.type') = 'step-finish' " +
+    "AND json_extract(data, '$.reason') = 'stop'"
   )
-  const row = stmt.get(sessionId) as PartInfo | undefined
-  return row ?? null
+  const row = stmt.get(sessionId) as { max_time: number | null } | undefined
+  return row?.max_time ?? 0
 }
 
 export async function getLatestAssistantPart(sessionId: string): Promise<LatestPartInfo | null> {

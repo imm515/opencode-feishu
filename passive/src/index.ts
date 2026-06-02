@@ -3,7 +3,7 @@ import {
   getActiveSessions,
   getRecentlyArchivedSessions,
   getLatestAssistantPart,
-  getLatestPartInfo,
+  getLatestStepFinishStopTime,
   getLatestPartTime,
   closeDb,
   refreshDb,
@@ -22,7 +22,6 @@ import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "no
 import { PKG_FILE } from "./paths.js"
 
 const ARCHIVE_GRACE_MS = 5 * 60 * 1000
-const DONE_IDLE_TIMEOUT_MS = 5 * 60 * 1000
 
 const DRY_RUN = process.argv.includes("--dry-run")
 const ONE_SHOT = process.argv.includes("--once")
@@ -126,21 +125,13 @@ async function poll(): Promise<void> {
         debug("[active:prime] " + title + " latestPartTime=" + letP)
 
         // Seed lastDoneTime = now for sessions that already have step-finish(stop)
-        // This prevents 5-min timeout from immediately firing on restart
-        const startSeed = await getLatestPartInfo(session.id)
+        // Prevents immediate done push on restart for already-completed sessions
+        const startStop = await getLatestStepFinishStopTime(session.id)
         markSeen(state, session.id, letP, "", 0)
-        if (startSeed && startSeed.type === "step-finish" && startSeed.reason === "stop") {
+        if (startStop) {
           state[session.id].lastDoneTime = Date.now()
         }
         continue
-      }
-
-      // Seed lastDoneTime on first encounter after daemon restart
-      if (!prev?.lastDoneTime) {
-        const seedPart = await getLatestPartInfo(session.id)
-        if (seedPart && seedPart.type === "step-finish" && seedPart.reason === "stop") {
-          state[session.id].lastDoneTime = Date.now()
-        }
       }
 
       const latest = await getLatestAssistantPart(session.id)
@@ -206,16 +197,18 @@ async function poll(): Promise<void> {
         markSeen(state, session.id, latestTime, "", 0)
       }
 
-      // Timeout-based done fallback: step-finish(stop) + 5 min idle = done
-      const latestPart = await getLatestPartInfo(session.id)
-      if (latestPart && latestPart.type === "step-finish" && latestPart.reason === "stop" && latestPart.time_created > DAEMON_STARTED_AT) {
-        const idleMs = Date.now() - latestPart.time_created
+      if (!hasNew) {
+        markSeen(state, session.id, latestTime, "", 0)
+      }
+
+      // Done detection: latest step-finish(reason=stop) in any position
+      const stopTime = await getLatestStepFinishStopTime(session.id)
+      if (stopTime > DAEMON_STARTED_AT) {
         const lastDone = getEntry(state, session.id)?.lastDoneTime ?? 0
-        const sinceLastDone = Date.now() - lastDone
-        if (idleMs >= DONE_IDLE_TIMEOUT_MS && sinceLastDone >= DONE_IDLE_TIMEOUT_MS) {
+        if (stopTime > lastDone) {
           const latestTextForDone = latestText || ((await getLatestAssistantPart(session.id))?.text ?? "")
           try {
-            debug("[active:push:done:idle] " + title + " idleMs=" + idleMs + " sinceLastDone=" + sinceLastDone)
+            debug("[active:PUSH:done] " + title + " stopTime=" + stopTime)
             if (!DRY_RUN) {
               await sendNotify({
                 appId: config.appId,
@@ -224,16 +217,16 @@ async function poll(): Promise<void> {
                 sessionTitle: session.title,
                 kind: "done",
                 text: latestTextForDone || null,
-                archiveTime: latestPart.time_created,
-                textTime: latestPart.time_created,
+                archiveTime: stopTime,
+                textTime: stopTime,
               })
             }
-            recordDone(state, session.id, Date.now())
+            recordDone(state, session.id, stopTime)
             pushes++
             detailLines.push("done: " + title)
-            markSeen(state, session.id, latestPart.time_created, "", 0)
+            markSeen(state, session.id, stopTime, "", 0)
           } catch (err) {
-            error("done idle push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
+            error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
           }
         }
       }
