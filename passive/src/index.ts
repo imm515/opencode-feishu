@@ -124,12 +124,12 @@ async function poll(): Promise<void> {
         const letP = await getLatestPartTime(session.id)
         debug("[active:prime] " + title + " latestPartTime=" + letP)
 
-        // Seed lastDoneTime = now for sessions that already have step-finish(stop)
-        // Prevents immediate done push on restart for already-completed sessions
+        // Seed lastDoneTime = stop time for sessions that already have step-finish(stop)
+        // Prevents immediate re-push: stopTime > lastDoneTime is false when both equal
         const startStop = await getLatestStepFinishStopTime(session.id)
         markSeen(state, session.id, letP, "", 0)
         if (startStop) {
-          state[session.id].lastDoneTime = Date.now()
+          state[session.id].lastDoneTime = startStop
         }
         continue
       }
