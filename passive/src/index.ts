@@ -156,7 +156,9 @@ async function poll(): Promise<void> {
       }
 
       const hasNew = latestTime > prevTime
-      debug("[active:check] " + title + " prevTime=" + prevTime + " latestTime=" + latestTime + " hasNew=" + hasNew)
+      const ctxStop = await getLatestStepFinishStopTime(session.id)
+      const ctxLatest = await getLatestPartTime(session.id)
+      debug("[active:check] " + title + " latestTime=" + latestTime + " hasNew=" + hasNew + " stop=" + ctxStop + " latestPart=" + ctxLatest + " isLast=" + (ctxLatest === ctxStop))
 
       let latestText = ""
 
@@ -195,6 +197,7 @@ async function poll(): Promise<void> {
           }
           recordPush(state, session.id, replyText, replyTime, 0)
           pushes++
+          debug("[active:push:ctx] " + title + " stop=" + ctxStop + " latest=" + ctxLatest + " isLast=" + (ctxLatest === ctxStop))
           detailLines.push("reply: " + title)
         } catch (err) {
           error("reply push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
@@ -211,8 +214,8 @@ async function poll(): Promise<void> {
       // Done detection: debounce by one poll cycle (20s)
       // Only fire done when the LAST event in the session is a step-finish(stop).
       // If newer parts (step-start, text, tool) exist after the stop, the session is still active.
-      const stopTime = await getLatestStepFinishStopTime(session.id)
-      const latestPartTime = await getLatestPartTime(session.id)
+      const stopTime = ctxStop
+      const latestPartTime = ctxLatest
       const curEntry = getEntry(state, session.id)
       const lastDone = curEntry?.lastDoneTime ?? 0
       const pendingDone = curEntry?.pendingDoneTime ?? 0
