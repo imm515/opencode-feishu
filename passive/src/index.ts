@@ -209,23 +209,26 @@ async function poll(): Promise<void> {
       }
 
       // Done detection: debounce by one poll cycle (20s)
+      // Only fire done when the LAST event in the session is a step-finish(stop).
+      // If newer parts (step-start, text, tool) exist after the stop, the session is still active.
       const stopTime = await getLatestStepFinishStopTime(session.id)
+      const latestPartTime = await getLatestPartTime(session.id)
       const curEntry = getEntry(state, session.id)
       const lastDone = curEntry?.lastDoneTime ?? 0
       const pendingDone = curEntry?.pendingDoneTime ?? 0
+      const isLastPartStop = latestPartTime === stopTime
 
       if (stopTime > DAEMON_STARTED_AT && stopTime > lastDone) {
-        // Check pending from previous poll
         if (pendingDone) {
           if (stopTime > pendingDone) {
             // Newer stop appeared — update pending
             setPendingDone(state, session.id, stopTime)
             debug("[active:pending:updated] " + title + " stopTime=" + stopTime)
-          } else {
-            // Same stop, no new activity — fire done
+          } else if (isLastPartStop) {
+            // Same stop AND it's the last part in the session — fire done
             const latestTextForDone = latestText || ((await getLatestAssistantPart(session.id))?.text ?? "")
             try {
-              debug("[active:PUSH:done] " + title + " stopTime=" + stopTime)
+              debug("[active:PUSH:done] " + title + " stopTime=" + stopTime + " latestPartTime=" + latestPartTime)
               if (!DRY_RUN) {
                 await sendNotify({
                   appId: config.appId,
@@ -245,16 +248,20 @@ async function poll(): Promise<void> {
             } catch (err) {
               error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
             }
+          } else {
+            // New activity appeared after the stop — clear pending, session still active
+            clearPendingDone(state, session.id)
+            debug("[active:pending:cleared:newact] " + title + " stopTime=" + stopTime + " latestPartTime=" + latestPartTime)
           }
         } else {
           // First detection — set pending, wait one cycle
           setPendingDone(state, session.id, stopTime)
           debug("[active:pending:set] " + title + " stopTime=" + stopTime + " will fire next poll if no new content")
         }
-      } else if (pendingDone && stopTime <= lastDone) {
-        // Stop already done — clear stale pending
+      } else if (pendingDone && (stopTime <= lastDone || !isLastPartStop)) {
+        // Either already done or new activity appeared — clear stale pending
         clearPendingDone(state, session.id)
-        debug("[active:pending:cleared] " + title + " stopTime=" + stopTime + " already done")
+        debug("[active:pending:cleared] " + title + " stopTime=" + stopTime + " already=" + (stopTime <= lastDone) + " isLastPartStop=" + isLastPartStop)
       }
     }
   }
