@@ -48,6 +48,11 @@ export interface LatestPartInfo {
   type: string
 }
 
+export interface PartChunk {
+  text: string
+  time_created: number
+}
+
 export async function getLatestPartTime(sessionId: string): Promise<number> {
   const db = getDb()
   const stmt = db.prepare("SELECT MAX(time_created) AS max_time FROM part WHERE session_id = ?")
@@ -77,6 +82,34 @@ export async function getLatestAssistantPart(sessionId: string): Promise<LatestP
   const row = stmt.get(sessionId) as LatestPartInfo | undefined
   if (!row || !row.text) return null
   return row
+}
+
+/**
+ * Concatenate all assistant text parts after `sinceTime` in order.
+ * Returns joined text + the latest part's time_created.
+ * Used to assemble a full streamed reply across multiple part chunks.
+ */
+export async function getAssistantTextSince(
+  sessionId: string,
+  sinceTime: number,
+): Promise<{ text: string; latestTime: number; chunkCount: number }> {
+  const db = getDb()
+  const stmt = db.prepare(
+    "SELECT json_extract(p.data, '$.text') AS text, p.time_created " +
+    "FROM part AS p JOIN message AS m ON m.id = p.message_id " +
+    "WHERE p.session_id = ? AND json_extract(p.data, '$.type') = 'text' " +
+    "AND json_extract(m.data, '$.role') = 'assistant' " +
+    "AND p.time_created > ? " +
+    "ORDER BY p.time_created ASC"
+  )
+  const rows = stmt.all(sessionId, sinceTime) as { text: string | null; time_created: number }[]
+  let joined = ""
+  let latest = sinceTime
+  for (const r of rows) {
+    if (r.text) joined += r.text
+    if (r.time_created > latest) latest = r.time_created
+  }
+  return { text: joined, latestTime: latest, chunkCount: rows.length }
 }
 
 export async function refreshDb(): Promise<void> {

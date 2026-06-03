@@ -3,6 +3,7 @@ import {
   getActiveSessions,
   getRecentlyArchivedSessions,
   getLatestAssistantPart,
+  getAssistantTextSince,
   getLatestStepFinishStopTime,
   getLatestPartTime,
   closeDb,
@@ -169,8 +170,17 @@ async function poll(): Promise<void> {
           continue
         }
 
+        // === ASSEMBLE FULL STREAMED REPLY ===
+        // AI streams text in multiple part chunks. We must concatenate all
+        // assistant text parts since the last push to capture the full reply
+        // (not just the last streaming chunk).
+        const joined = await getAssistantTextSince(session.id, prevTime)
+        const replyText = joined.text.trim() || latest.text.trim()
+        const replyTime = joined.latestTime
+        debug("[active:assemble] " + title + " chunks=" + joined.chunkCount + " len=" + replyText.length + " replyTime=" + replyTime)
+
         // === PUSH REPLY ===
-        latestText = latest.text
+        latestText = replyText
         try {
           if (!DRY_RUN) {
             await sendNotify({
@@ -179,11 +189,11 @@ async function poll(): Promise<void> {
               sessionId: session.id,
               sessionTitle: session.title,
               kind: "reply",
-              text: latestText,
-              textTime: latestTime,
+              text: replyText,
+              textTime: replyTime,
             })
           }
-          recordPush(state, session.id, latestText, latestTime, 0)
+          recordPush(state, session.id, replyText, replyTime, 0)
           pushes++
           detailLines.push("reply: " + title)
         } catch (err) {
