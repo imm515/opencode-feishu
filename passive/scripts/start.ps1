@@ -1,6 +1,17 @@
-# opencode-feishu passive monitor — start daemon
+# opencode-feishu passive monitor — start / restart daemon
+# Usage:
+#   start.ps1                  start (idempotent)
+#   start.ps1 -Action restart  kill existing, then start
+#   start.ps1 -Action stop     kill existing only
+#   start.ps1 -Action status   print current state
+#
 # Uses tsx to run TypeScript directly (no build step needed).
 # Idempotent: if already running, prints existing PID and exits 0.
+
+param(
+    [ValidateSet("start", "restart", "stop", "status")]
+    [string]$Action = "start"
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -13,6 +24,46 @@ $outLog       = Join-Path $logDir "passive.out.log"
 $errLog       = Join-Path $logDir "passive.err.log"
 
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+
+# --- Helpers for stop / status ---
+function Stop-AllDaemons {
+    $pids = Find-AllDaemonPids
+    if ($pids.Count -eq 0) {
+        Write-Host "[stop] no daemon running"
+        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+        return
+    }
+    foreach ($p in $pids) {
+        Write-Host "[stop] killing PID $p"
+        Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+    }
+    # Wait up to 5s for processes to exit
+    for ($i = 0; $i -lt 10; $i++) {
+        $alive = $pids | Where-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue) -ne $null }
+        if (-not $alive) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $passiveRoot ".passive.lock") -Force -ErrorAction SilentlyContinue
+    Write-Host "[stop] done"
+}
+
+function Show-Status {
+    $pids = Find-AllDaemonPids
+    if ($pids.Count -eq 0) {
+        Write-Host "[status] daemon: not running"
+        if (Test-Path $pidFile) { Write-Host "[status] stale pid file: $((Get-Content $pidFile) -join '')" }
+        return
+    }
+    foreach ($p in $pids) {
+        $proc = Get-Process -Id $p -ErrorAction SilentlyContinue
+        if ($proc) {
+            Write-Host "[status] daemon running PID=$p started=$($proc.StartTime) uptime=$((Get-Date) - $proc.StartTime)"
+        } else {
+            Write-Host "[status] PID $p not alive"
+        }
+    }
+}
 
 function Get-TsxPath {
     $cmd = Get-Command tsx.exe -ErrorAction SilentlyContinue
@@ -46,6 +97,19 @@ function Enforce-SingleDaemon {
     return @($keep)
 }
 
+# --- Action routing ---
+switch ($Action) {
+    "status" { Show-Status; exit 0 }
+    "stop"   { Stop-AllDaemons; exit 0 }
+    "restart" {
+        Write-Host "[restart] stopping existing daemons first"
+        Stop-AllDaemons
+        Start-Sleep -Seconds 1
+        # fall through to start logic
+    }
+    "start" { /* normal start below */ }
+}
+
 # Idempotency check: PID file
 $existing = (Get-Content $pidFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
 if ($existing) {
@@ -75,14 +139,22 @@ if (-not (Test-Path $srcEntry)) {
     exit 2
 }
 
-$tsxPath = Get-TsxPath
+# Always run compiled output (production). tsx is for ad-hoc debugging only.
+$tsxPath = $null
+$nodePath = (Get-Command node.exe -ErrorAction SilentlyContinue).Path
+if (-not $nodePath) { throw "node not found in PATH" }
+$distEntry = Join-Path $passiveRoot "dist\index.js"
+if (-not (Test-Path $distEntry)) {
+    Write-Host "[warn] $distEntry missing — falling back to tsx"
+    $tsxPath = Get-TsxPath
+}
 
-Write-Host "[start] $tsxPath"
+Write-Host "[start] $($nodePath) (compiled)"
 Write-Host "[cwd]   $passiveRoot"
-Write-Host "[entry] $srcEntry"
+Write-Host "[entry] $distEntry"
 
-$proc = Start-Process -FilePath ($tsxPath.Split(" ")[0]) `
-    -ArgumentList "$($tsxPath.Split(" ")[1..99] -join ' ') `"$srcEntry`"" `
+$proc = Start-Process -FilePath $nodePath `
+    -ArgumentList "`"$distEntry`"" `
     -WorkingDirectory $passiveRoot `
     -WindowStyle Hidden `
     -PassThru

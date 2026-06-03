@@ -119,12 +119,6 @@ export async function sendNotify(params: NotifyParams): Promise<void> {
   if (kind === "done") {
     title = `✅ OpenCode 任务完成`
     sections.push({ type: "markdown", content: `**会话**: ${t}` })
-    if (text && text.trim()) {
-      sections.push({ type: "divider" })
-      sections.push({ type: "markdown", content: truncateMarkdown(text) })
-    } else {
-      sections.push({ type: "markdown", content: `\n任务已结束（无文本输出）。` })
-    }
     sections.push({
       type: "note",
       content: `结束时间: ${fmtTime(archiveTime)}  |  session: ${sessionId.slice(0, 12)}…`,
