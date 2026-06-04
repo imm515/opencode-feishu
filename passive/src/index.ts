@@ -1,4 +1,4 @@
-import { loadConfig, POLL_INTERVAL_MS, CHAT_ID } from "./config.js"
+import { loadConfig, DB_PATH, CHAT_ID, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS } from "./config.js"
 import {
   getActiveSessions,
   getRecentlyArchivedSessions,
@@ -23,6 +23,7 @@ import {
 import { info, error, debug, logPoll, setVerbose } from "./logger.js"
 import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs"
 import { PKG_FILE } from "./paths.js"
+import { FileWatcher } from "./watcher.js"
 
 const ARCHIVE_GRACE_MS = 5 * 60 * 1000
 
@@ -283,7 +284,8 @@ async function main(): Promise<void> {
     node: process.version,
     platform: process.platform,
     cwd: process.cwd(),
-    pollIntervalMs: POLL_INTERVAL_MS,
+    watchDebounceMs: WATCH_DEBOUNCE_MS,
+    fallbackCheckMs: FALLBACK_CHECK_MS,
     chatId: CHAT_ID,
     archiveGraceMs: ARCHIVE_GRACE_MS,
     dryRun: DRY_RUN,
@@ -336,14 +338,20 @@ async function main(): Promise<void> {
   }
   info("Lock acquired, PID " + process.pid)
 
-  const interval = setInterval(async () => {
+  // Event-driven watcher (Layer 1+2) + fallback timer (Layer 3)
+  let pollInFlight = false
+  const watcher = new FileWatcher(DB_PATH, async () => {
+    if (pollInFlight) return
+    pollInFlight = true
     try { await poll() }
     catch (err) { error("Poll error", { e: err instanceof Error ? err.message : String(err) }) }
-  }, POLL_INTERVAL_MS)
+    finally { pollInFlight = false }
+  }, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS)
+  watcher.start()
 
   const shutdown = (sig: string) => {
     info("Received " + sig + ", shutting down")
-    clearInterval(interval)
+    watcher.stop()
     closeDb()
     try {
       const currentPid = parseInt(readFileSync(lockFile, "utf-8").trim(), 10)
@@ -359,16 +367,18 @@ async function main(): Promise<void> {
   process.on("uncaughtException", (err) => error("uncaught", { e: err.message, s: err.stack }))
   process.on("unhandledRejection", (r) => error("unhandled", { r: String(r) }))
 
+  // Initial poll on startup
   await poll()
   if (ONE_SHOT) {
     info("--once, exiting")
+    watcher.stop()
     try {
       const currentPid = parseInt(readFileSync(lockFile, "utf-8").trim(), 10)
       if (currentPid === process.pid) unlinkSync(lockFile)
     } catch {}
     process.exit(0)
   }
-  info("Daemon running, polling every " + POLL_INTERVAL_MS + "ms")
+  info("Daemon running, watching " + DB_PATH + " (debounce=" + WATCH_DEBOUNCE_MS + "ms, fallback=" + FALLBACK_CHECK_MS + "ms)")
 }
 
 main().catch((err) => { error("Fatal", { e: err.message }); process.exit(1) })

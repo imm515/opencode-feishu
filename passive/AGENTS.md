@@ -4,26 +4,60 @@
 
 被动模式是一个**完全独立**的 Node.js 服务，不依赖 opencode-feishu 插件，实现：
 
-- **主动推送**：轮询 `opencode.db`，检测 AI 状态变化，主动发卡片到飞书
+- **主动推送**：检测 `opencode.db` 变化，发卡片到飞书通知 AI 状态
 - **零 AI 算力**：完全基于 DB 查询和 Feishu API 调用，不消耗 OpenCode AI token
 - **独立配置**：使用 `passive/feishu.json`，不依赖插件目录
 
-## 架构
+## 架构 (事件驱动分层)
 
 ```
-opencode.db (轮询)
-       │
-       ▼
-┌─────────────────┐
-│ passive/src/    │
-│                 │
-│ index.ts        │ ────────→ Feishu API
-│ state-machine   │ 状态机     (appId/appSecret
-│ db.ts           │            from feishu.json)
-│ notify.ts       │ 通知
-│ sender.ts       │ 发卡
-│ card-dsl.ts     │ 卡片 DSL
-└─────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│  分层事件驱动架构                                           │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│  第1层 (触发器)   fs.watch 监控 opencode.db 修改事件        │
+│                  + opencode.db-wal / -shm                 │
+│                  → CPU ≈ 0% (操作系统回调)                 │
+│                       │                                   │
+│                       ▼                                   │
+│  第2层 (闸门)     防抖 2s，批处理快速连续写入               │
+│                  校验 DB mtime 是否真正变化                 │
+│                  排除误触发                                │
+│                       │                                   │
+│                       ▼                                   │
+│  第3层 (处理器)   执行完整 poll() 逻辑                     │
+│                  DB 查询 → 状态比较 → 飞书卡片推送          │
+│                  SQLite 连接复用 (WAL 模式, 不反复开关)      │
+│                                                           │
+│  安全网: 每 120s 的 fallback 检查 (fs.watch 遗漏兜底)       │
+└───────────────────────────────────────────────────────────┘
+```
+
+### vs 旧架构
+
+| 指标 | 旧架构 (setInterval 20s) | 新架构 (事件驱动) |
+|------|------------------------|------------------|
+| 空闲 CPU | ~15-17% (持续轮询) | ≈ 0% (仅回调触发) |
+| DB 连接 | 每次 poll 关闭/重开 | 永久复用 (WAL) |
+| 轮询间隔 | 固定 20s (硬编码) | 事件触发 + 120s 兜底 |
+| 配置方式 | 不可配 | 环境变量 / CLI 参数 |
+
+## 文件结构
+
+```
+passive/src/
+├── index.ts         # 入口，初始 poll + 事件驱动主循环
+├── watcher.ts       # 分层文件监控器 (fs.watch + 防抖 + fallback)
+├── config.ts        # 配置 (含 env/CLI 参数支持)
+├── paths.ts         # 路径常量
+├── db.ts            # SQLite 查询 (WAL 模式, 连接复用)
+├── state-machine.ts # 状态检测
+├── notify.ts        # 卡片构建 + 发送
+├── sender.ts        # Feishu API
+├── card-dsl.ts      # DSL → Card JSON
+├── logger.ts        # 日志
+├── markdown.ts      # Markdown 截断
+└── utils.ts         # TtlMap
 ```
 
 ## 状态机
@@ -40,10 +74,11 @@ opencode.db (轮询)
 passive/
 ├── feishu.json         # 独立配置（appId/appSecret，仓库内提交）
 ├── src/
-│   ├── index.ts         # 入口，轮询循环
-│   ├── config.ts        # 加载 feishu.json，配置常量
+│   ├── index.ts         # 入口，事件驱动主循环
+│   ├── watcher.ts       # 分层文件监控器 (fs.watch + 防抖 + fallback)
+│   ├── config.ts        # 加载 feishu.json，配置常量 (支持 env/CLI)
 │   ├── paths.ts         # 路径常量（含 STANDALONE_CONFIG）
-│   ├── db.ts            # SQLite 查询封装
+│   ├── db.ts            # SQLite 查询 (WAL 模式, 连接复用)
 │   ├── state-machine.ts # 状态检测与转换
 │   ├── notify.ts        # 卡片构建 + 发送
 │   ├── sender.ts        # Feishu API（token + 发送）
@@ -63,6 +98,24 @@ npm run build
 npm start
 ```
 
+## 运行时配置 (环境变量 / CLI 参数)
+
+| 参数 | 环境变量 | 默认值 | 说明 |
+|------|---------|--------|------|
+| `--debounce-ms` | `FEISHU_DEBOUNCE_MS` | `2000` | fs.watch 触发后防抖等待(ms) |
+| `--fallback-ms` | `FEISHU_FALLBACK_MS` | `120_000` | fallback 定时检查间隔(ms) |
+| `--poll-ms` | `FEISHU_POLL_MS` | `20_000` | (保留)强制轮询间隔，覆盖事件驱动 |
+| `FEISHU_PROXY` | `FEISHU_PROXY` | `http://127.0.0.1:10809` | Feishu API 代理地址 |
+
+所有参数最小为 1000ms。示例:
+```bash
+# 加大防抖和 fallback 间隔，进一步降低资源
+FEISHU_DEBOUNCE_MS=5000 FEISHU_FALLBACK_MS=300000 npm start
+
+# 用 CLI 参数
+node dist/index.js --debounce-ms=3000 --fallback-ms=180000
+```
+
 ## 依赖文件
 
 | 文件 | 来源 | 用途 |
@@ -74,9 +127,10 @@ npm start
 
 | | opencode-feishu 插件 | passive 模式 |
 |---|---|---|
-| 触发方式 | 飞书消息→AI→飞书 | DB 轮询 |
+| 触发方式 | 飞书消息→AI→飞书 | fs.watch DB 事件驱动 |
 | AI 算力 | 消耗 | 不消耗 |
-| 状态检测 | WebSocket 事件 | part 表轮询 |
+| 状态检测 | WebSocket 事件 | fs.watch → DB 查询 |
+| 空闲 CPU | ≈ 0% (事件驱动) | ≈ 0% (事件驱动) |
 | 发卡片能力 | feishu_send_card tool | Feishu API 直接调 |
 | 可独立运行 | 否（依赖 opencode） | **是** |
 | 配置位置 | `~/.config/opencode/plugins/feishu.json` | `passive/feishu.json` |

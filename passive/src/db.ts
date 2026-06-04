@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite"
+import { statSync } from "node:fs"
 import { join } from "path"
 import os from "node:os"
 
@@ -7,17 +8,26 @@ const DB_PATH = join(os.homedir(), ".local", "share", "opencode", "opencode.db")
 let _db: DatabaseSync | null = null
 
 function getDb(): DatabaseSync {
-  if (_db) {
-    // Re-read WAL by closing and re-opening each poll
-    try { _db.close() } catch {}
+  if (!_db) {
+    _db = new DatabaseSync(DB_PATH)
+    // WAL mode: reader never blocks, never needs close/reopen
+    _db.exec("PRAGMA journal_mode=WAL")
   }
-  _db = new DatabaseSync(DB_PATH)
   return _db
 }
 
 export function closeDb(): void {
   try { _db?.close() } catch {}
   _db = null
+}
+
+/** Return DB file mtime (ms) for change detection. */
+export function getDbMtime(): number {
+  try {
+    return statSync(DB_PATH).mtimeMs
+  } catch {
+    return 0
+  }
 }
 
 export interface Session {
@@ -112,7 +122,7 @@ export async function getAssistantTextSince(
   return { text: joined, latestTime: latest, chunkCount: rows.length }
 }
 
+/** Ensure DB is open. In WAL mode reads see latest committed data automatically. */
 export async function refreshDb(): Promise<void> {
-  closeDb()
   getDb()
 }

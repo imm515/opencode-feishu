@@ -32,4 +32,19 @@ export function loadConfig(configPath?: string): ResolvedConfig {
 export const DB_PATH = join(os.homedir(), ".local", "share", "opencode", "opencode.db")
 export const PROXY = process.env.FEISHU_PROXY ?? "http://127.0.0.1:10809"
 export const CHAT_ID = "oc_82bb66a73329cf403644debd24c86ec5"
-export const POLL_INTERVAL_MS = 20_000
+
+function envInt(key: string, fallback: number): number {
+  return process.env[key] ? Math.max(1000, parseInt(process.env[key]!, 10) || fallback) : fallback
+}
+
+function cliInt(flag: string, fallback: number): number {
+  const idx = process.argv.indexOf(flag)
+  if (idx >= 0 && idx + 1 < process.argv.length) {
+    return Math.max(1000, parseInt(process.argv[idx + 1], 10) || fallback)
+  }
+  return fallback
+}
+
+export const POLL_INTERVAL_MS = cliInt("--poll-ms", envInt("FEISHU_POLL_MS", 20_000))
+export const WATCH_DEBOUNCE_MS = cliInt("--debounce-ms", envInt("FEISHU_DEBOUNCE_MS", 2_000))
+export const FALLBACK_CHECK_MS = cliInt("--fallback-ms", envInt("FEISHU_FALLBACK_MS", 120_000))
