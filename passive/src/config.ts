@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import os from "node:os"
+import { STANDALONE_CONFIG } from "./paths.js"
 
 const FeishuConfigSchema = {
   appId: (v: unknown) => typeof v === "string" && v.length > 0,
@@ -9,10 +10,17 @@ const FeishuConfigSchema = {
 
 export type ResolvedConfig = { appId: string; appSecret: string }
 
+/**
+ * Load feishu config from passive/feishu.json (standalone, independent of plugin).
+ * Optional configPath override for testing.
+ */
 export function loadConfig(configPath?: string): ResolvedConfig {
-  const path = configPath ?? join(os.homedir(), ".config", "opencode", "plugins", "feishu.json")
+  const path = configPath ?? STANDALONE_CONFIG
   if (!existsSync(path)) {
-    throw new Error(`Missing feishu config: ${path}`)
+    throw new Error(
+      `Missing feishu config: ${path}\n` +
+      `Create passive/feishu.json with {"appId":"cli_xxx","appSecret":"xxx"}`
+    )
   }
   const raw = JSON.parse(readFileSync(path, "utf-8"))
   if (!FeishuConfigSchema.appId(raw.appId) || !FeishuConfigSchema.appSecret(raw.appSecret)) {

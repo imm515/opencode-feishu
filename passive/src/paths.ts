@@ -13,3 +13,6 @@ export const PKG_FILE = join(PASSIVE_DIR, "package.json")
 
 export const START_LOG = join(LOG_DIR, "passive.log")
 export const ERR_LOG = join(LOG_DIR, "passive.err")
+
+/** Standalone config path — independent of the opencode-feishu plugin */
+export const STANDALONE_CONFIG = join(PASSIVE_DIR, "feishu.json")
