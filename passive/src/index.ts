@@ -182,27 +182,11 @@ async function poll(): Promise<void> {
         const replyTime = joined.latestTime
         debug("[active:assemble] " + title + " chunks=" + joined.chunkCount + " len=" + replyText.length + " replyTime=" + replyTime)
 
-        // === PUSH REPLY ===
+        // Passive mode now tracks new assistant text only for done detection/state.
+        // No intermediate reply card is pushed.
         latestText = replyText
-        try {
-          if (!DRY_RUN) {
-            await sendNotify({
-              appId: config.appId,
-              appSecret: config.appSecret,
-              sessionId: session.id,
-              sessionTitle: session.title,
-              kind: "reply",
-              text: replyText,
-              textTime: replyTime,
-            })
-          }
-          recordPush(state, session.id, replyText, replyTime, 0)
-          pushes++
-          debug("[active:push:ctx] " + title + " stop=" + ctxStop + " latest=" + ctxLatest + " isLast=" + (ctxLatest === ctxStop))
-          detailLines.push("reply: " + title)
-        } catch (err) {
-          error("reply push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
-        }
+        markSeen(state, session.id, replyTime, replyText, 0)
+        debug("[active:skip:reply_push_disabled] " + title + " stop=" + ctxStop + " latest=" + ctxLatest + " isLast=" + (ctxLatest === ctxStop))
       } else if (hasNew) {
         debug("[active:skip:empty] " + title + " latestTime=" + latestTime + " text is empty")
         markSeen(state, session.id, latestTime, "", 0)
