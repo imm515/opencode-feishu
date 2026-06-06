@@ -204,6 +204,7 @@ async function poll(onPendingWake?: () => void): Promise<void> {
   await refreshDb()
   const config = loadConfig()
   const state = loadNotifiedState()
+  const now = Date.now()
 
   const isStartup = !HAS_PRIMED_CURRENT_PROCESS
   const stateStatus = isStartup ? "startup" : "running"
@@ -228,6 +229,24 @@ async function poll(onPendingWake?: () => void): Promise<void> {
   const activeSessions = await getActiveSessions()
   const archivedSessions = await getRecentlyArchivedSessions(COMPLETE_GRACE_MS)
   const activeSet = new Set(activeSessions.map((s) => s.id))
+  const sessionSet = new Set([...activeSessions, ...archivedSessions].map((s) => s.id))
+
+  for (const [sessionId, entry] of Object.entries(state)) {
+    if (sessionId.startsWith("_")) continue
+    const e = entry as SessionTrackEntry | undefined
+    if (!e?.pendingDoneAt) continue
+    if (sessionSet.has(sessionId)) continue
+    const overdueMs = now - (e.pendingDoneAt + COMPLETE_GRACE_MS)
+    if (overdueMs < 0) continue
+    debug(
+      "[pending:clear:orphan] "
+      + sessionId.slice(0, 18)
+      + " pendingDoneAt=" + e.pendingDoneAt
+      + " overdueMs=" + overdueMs
+    )
+    delete e.pendingDoneAt
+    delete e.lastPendingReason
+  }
 
   if (!isStartup) {
     for (const [sessionId, entry] of Object.entries(state)) {
