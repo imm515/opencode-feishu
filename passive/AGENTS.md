@@ -253,11 +253,52 @@ passive/src/
     - assistant text: `passive pending check 2`
     - assistant `step-finish(reason=stop)`
     - `time_archived = null`
-  - state 落盘证据：
-    - `lastSeenText: "passive pending check 2"`
-    - `lastSeenStopTime: 1780750781794`
-    - `pendingDoneAt: 1780750781794`
-    - `lastPushedAt: 0`
+- state 落盘证据：
+  - `lastSeenText: "passive pending check 2"`
+  - `lastSeenStopTime: 1780750781794`
+  - `pendingDoneAt: 1780750781794`
+  - `lastPushedAt: 0`
+
+## 2026-06-06 22:54-23:05 新补充：测试完成卡与多 PID 解释边界
+
+- `passive-watch-live-check-1104` 这张完成卡本轮已用 DB + passive 专用日志重新取证：
+  - 不是误判
+  - 不是历史重放
+  - 是当前 live passive daemon `PID 1104` 的真实 `done` 推送
+- 固定证据链：
+  - `passive/logs/2026-06-06.log`
+    - `22:54:48` `[push] kind=done session=ses_162925f3...`
+  - `opencode.db` 该 session 分片：
+    - user text
+    - assistant text `passive-watch-live-check-1104`
+    - assistant `step-finish(reason=stop)`
+  - `passive/logs/notify-state.json`
+    - `lastSeenStopTime = 1780757673774`
+    - `lastDoneStopTime = 1780757673774`
+    - `lastPushedAt = 1780757689802`
+- 这条结论的实际含义：
+  - 对于“只让 passive 推送真正完成”的目标，当前实现认为：
+    - 只要 session 在 DB 中出现了当前运行期内的 assistant text + `step-finish(stop)`，且静默窗口通过，就属于完成
+  - 所以这类极短测试 prompt 仍会被当作“真实完成任务”
+  - 若产品上不希望测试标题也产生正式完成卡，应单独设计“测试会话过滤/白名单”策略，而不是继续把它归因为完成判定 bug
+
+- 同时，本轮也把“今天为什么总换 PID”这件事重新定性：
+  - 当前证据支持：
+    - 多次 `PID` 变化主要来自重复执行 `start.ps1` / `restart.ps1`
+    - 属于**单实例重启换号**
+  - 当前不支持：
+    - “现在仍有多个 passive node 进程同时在跑”
+- 现场核对口径：
+  - 当前 live passive 只有一个：
+    - `PID 1104`
+    - 启动于 `2026-06-06 22:53:02 +08:00`
+  - `OpenCodeFeishuPassive` 计划任务状态为 `Ready`
+    - 表示已注册
+    - 不表示此刻在循环自拉起
+- 后续排障顺序应固定为：
+  1. 先看当前 node 进程数是否真的 `> 1`
+  2. 再看最近是否刚执行过 start/restart 脚本
+  3. 最后才讨论是否存在计划任务或守护脚本误触发
 - 这条证据已足够证明：
   - “same-poll 文本+stop 时 pending 丢失” 这个核心 bug 已被打通
   - 当前还**不能**直接宣布“完成卡链路完全恢复”
@@ -611,3 +652,45 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
   - `Show-Status` 优先以 `Find-AllDaemonPids()` 的实时扫描为准
   - 一旦扫到真实 daemon，会立刻回写 `.passive.pid` 与 `.passive.lock`
   - 只有完全扫不到 live daemon 时，才回退到旧 pid/lock 文件做 stale 提示
+
+## 2026-06-06 22:48 延迟 done 观察链路补充
+
+- 这次用户给出了一个可对时的体感延迟样本：
+  - 会话：`查找即征即退进项分析仓库`
+  - 用户看到完成大约在 `22:42:45`
+  - passive 完成卡收到时间在 `22:44`
+- 当前排查结论要分清：
+  1. 不是 quiet window `15000ms` 本身过长
+  2. 而是 passive 较晚才第一次观察到这次 `stop`
+- 为了把这类问题从“猜”变成“直接看日志”，当前 repo 新增 watcher 诊断层：
+  - `passive/src/watcher.ts`
+    - 不再只监听 DB 目录
+    - 现在同时监听：
+      - `opencode.db`
+      - `opencode.db-wal`
+      - `opencode.db-shm`
+      - 以及 DB 所在目录
+  - watcher 回调新增字段：
+    - `source=dir|file|fallback`
+    - `event`
+    - `filename`
+    - `signatureBefore`
+    - `signatureAfter`
+    - `changed`
+- `passive/src/index.ts` 对 done 观察延迟也新增了运行态字段：
+  - `stopObservedDelayMs`
+  - `triggerSource`
+  - `triggerEvent`
+  - `triggerChanged`
+  - `triggerObservedDelayMs`
+- 这批字段的目标不是“修饰日志”，而是下次再出现：
+  - “22:42 已完成，22:44 才推送”
+  时能直接区分：
+  - 是 `file` / `dir` watcher 及时唤醒了，只是 quiet window 在等
+  - 还是 watcher 没打到，最后靠 `fallback` 120s 兜底才观察到
+- 另外一个顺手修正：
+  - `notify-state.ts` 成功保存状态的日志：
+    - `[state] save ok`
+  - 现在应是 `INFO`
+  - 不是 `ERROR`
+  - 如果运行时还看到 `save ok` 以 error 级别出现，优先怀疑旧 daemon / 旧构建还在跑

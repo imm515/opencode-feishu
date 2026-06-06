@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, rmSync, copyFileSync } from "node:fs"
 import { LOG_DIR, STATE_FILE } from "./paths.js"
-import { error as logError } from "./logger.js"
+import { error as logError, info as logInfo } from "./logger.js"
 
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -131,7 +131,7 @@ export function saveNotifiedState(map: NotifiedMap): void {
     const persisted = readFileSync(STATE_FILE, "utf-8")
     const persistedHasLegacyKeys =
       persisted.includes("\"lastDoneTime\"") || persisted.includes("\"pendingDoneTime\"")
-    logError("[state] save ok", {
+    logInfo("[state] save ok", {
       file: STATE_FILE,
       sessionCount: Object.keys(normalized).filter((key) => !key.startsWith("_")).length,
       hasLegacyKeys,

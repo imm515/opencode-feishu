@@ -37,6 +37,7 @@ const STARTUP_CATCHUP_WINDOW_MS = Math.max(COMPLETE_GRACE_MS * 4, 10 * 60 * 1000
 const DAEMON_STARTED_AT = Date.now()
 let HAS_PRIMED_CURRENT_PROCESS = false
 let pendingWakeTimer: ReturnType<typeof setTimeout> | null = null
+let lastTriggerMeta: { source: string; event: string; filename: string | null; changed: boolean; observedAt: number } | null = null
 
 function readVersion(): string {
   try {
@@ -481,6 +482,11 @@ async function poll(onPendingWake?: () => void): Promise<void> {
         + " pendingReason=" + pendingReason
         + " quietForMs=" + elapsed
         + " latestStopTime=" + latestStopTime
+        + " stopObservedDelayMs=" + Math.max(0, pendingDoneTime - latestStopTime)
+        + " triggerSource=" + (lastTriggerMeta?.source ?? "startup")
+        + " triggerEvent=" + (lastTriggerMeta?.event ?? "")
+        + " triggerChanged=" + String(lastTriggerMeta?.changed ?? false)
+        + " triggerObservedDelayMs=" + (lastTriggerMeta ? Math.max(0, lastTriggerMeta.observedAt - latestStopTime) : 0)
       )
       try {
         const dedupEntry = wasDoneAlreadyPushed(
@@ -560,6 +566,8 @@ async function main(): Promise<void> {
   setVerbose(VERBOSE)
   const runtimeSignature = {
     indexHash: hashText(poll.toString()),
+    notifyStateHash: hashText(saveNotifiedState.toString()),
+    watcherHash: hashText(FileWatcher.toString()),
     sendNotifyHash: hashText(sendNotify.toString()),
     daemonStartedAt: DAEMON_STARTED_AT,
   }
@@ -657,7 +665,25 @@ async function main(): Promise<void> {
   }
   const watcher = new FileWatcher(
     DB_PATH,
-    async () => { void triggerPoll() },
+    async (trigger) => {
+      lastTriggerMeta = {
+        source: trigger.source,
+        event: trigger.event,
+        filename: trigger.filename,
+        changed: trigger.changed,
+        observedAt: Date.now(),
+      }
+      debug(
+        "[watch] source=" + trigger.source
+        + " event=" + trigger.event
+        + " filename=" + (trigger.filename ?? "")
+        + " changed=" + String(trigger.changed)
+        + " signatureBefore=" + trigger.signatureBefore
+        + " signatureAfter=" + trigger.signatureAfter
+      )
+      if (!trigger.changed) return
+      void triggerPoll()
+    },
     WATCH_DEBOUNCE_MS,
     FALLBACK_CHECK_MS,
   )
