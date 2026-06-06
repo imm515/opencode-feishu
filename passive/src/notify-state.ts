@@ -45,11 +45,15 @@ function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
   const entry = raw as LegacySessionTrackEntry
   const lastSeenTime = Number(entry.lastSeenTime ?? 0) || 0
   const lastSeenText = typeof entry.lastSeenText === "string" ? entry.lastSeenText : ""
+  const lastPushedAt = Number(entry.lastPushedAt ?? 0) || 0
+  // Legacy state files often stored "done already sent" in lastDoneTime while leaving
+  // lastSeenArchiveTime at 0. Since the done card is emitted after archive/grace, the
+  // push timestamp is a stronger lower bound for "this archive was already handled".
   const lastSeenArchiveTime = Math.max(
     Number(entry.lastSeenArchiveTime ?? 0) || 0,
     Number(entry.lastDoneTime ?? 0) || 0,
+    lastPushedAt,
   )
-  const lastPushedAt = Number(entry.lastPushedAt ?? 0) || 0
   const pendingDoneAt = Number((raw as any).pendingDoneAt ?? entry.pendingDoneTime ?? 0) || undefined
   return {
     lastSeenTime,
@@ -96,6 +100,10 @@ export function saveNotifiedState(map: NotifiedMap): void {
   const tmp = STATE_FILE + ".tmp"
   try {
     const body = JSON.stringify(normalized, null, 2)
+    const hasLegacyKeys = body.includes("\"lastDoneTime\"") || body.includes("\"pendingDoneTime\"")
+    if (hasLegacyKeys) {
+      logError("[state] legacy keys detected before save", { file: STATE_FILE })
+    }
     writeFileSync(tmp, body, "utf-8")
     try {
       // Windows renameSync cannot replace an existing file atomically like POSIX.
@@ -106,6 +114,17 @@ export function saveNotifiedState(map: NotifiedMap): void {
       copyFileSync(tmp, STATE_FILE)
       rmSync(tmp, { force: true })
     }
+    const persisted = readFileSync(STATE_FILE, "utf-8")
+    const persistedHasLegacyKeys =
+      persisted.includes("\"lastDoneTime\"") || persisted.includes("\"pendingDoneTime\"")
+    logError("[state] save ok", {
+      file: STATE_FILE,
+      sessionCount: Object.keys(normalized).filter((key) => !key.startsWith("_")).length,
+      hasLegacyKeys,
+      persistedHasLegacyKeys,
+      schemaVersion: normalized._schemaVersion ?? null,
+      daemonStartedAt: normalized._daemonStartedAt ?? null,
+    })
   } catch (err) {
     logError("[state] save failed", { file: STATE_FILE, e: err instanceof Error ? err.message : String(err) })
   }

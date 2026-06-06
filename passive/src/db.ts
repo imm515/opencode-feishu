@@ -51,6 +51,13 @@ export async function getRecentlyArchivedSessions(graceMs: number): Promise<Sess
   return stmt.all(cutoff) as unknown as Session[]
 }
 
+export async function getSessionArchiveTime(sessionId: string): Promise<number | null> {
+  const db = getDb()
+  const stmt = db.prepare("SELECT time_archived FROM session WHERE id = ? LIMIT 1")
+  const row = stmt.get(sessionId) as { time_archived: number | null } | undefined
+  return row?.time_archived ?? null
+}
+
 export interface LatestPartInfo {
   text: string
   time_created: number
@@ -124,5 +131,9 @@ export async function getAssistantTextSince(
 
 /** Ensure DB is open. In WAL mode reads see latest committed data automatically. */
 export async function refreshDb(): Promise<void> {
+  // Runtime evidence showed long-lived reads can drift from the current session table
+  // view, causing passive to act on stale archive state. Reopen on each refresh so
+  // every poll observes a fresh snapshot from disk.
+  closeDb()
   getDb()
 }

@@ -6,6 +6,7 @@ import {
   getAssistantTextSince,
   getLatestPartTime,
   getLatestStepFinishStopTime,
+  getSessionArchiveTime,
   closeDb,
   refreshDb,
 } from "./db.js"
@@ -23,6 +24,7 @@ import { info, error, debug, logPoll, setVerbose } from "./logger.js"
 import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs"
 import { PKG_FILE } from "./paths.js"
 import { FileWatcher } from "./watcher.js"
+import { createHash } from "node:crypto"
 
 const ARCHIVE_GRACE_MS = 5 * 60 * 1000
 
@@ -47,6 +49,10 @@ function readVersion(): string {
 function shortTitle(title: string | null | undefined, id: string): string {
   if (!title) return id
   return title.length > 40 ? title.slice(0, 40) + "..." : title
+}
+
+function hashText(text: string): string {
+  return createHash("sha1").update(text).digest("hex").slice(0, 12)
 }
 
 async function poll(): Promise<void> {
@@ -129,13 +135,18 @@ async function poll(): Promise<void> {
           markSeen(state, session.id, latestPartTime, "", archiveTime)
         } else {
           // === DEDUP: re-read state to check if another instance already handled this archive ===
-          const freshState = loadNotifiedState()
-          const freshEntry = getEntry(freshState, session.id)
-          if (freshEntry && freshEntry.lastSeenArchiveTime >= archiveTime) {
-            debug("[arch:skip:dedup] " + title + " another instance already handled archiveTime=" + archiveTime)
-            markSeen(state, session.id, freshEntry.lastSeenTime, "", archiveTime)
-            continue
-          }
+                  const freshState = loadNotifiedState()
+                  const freshEntry = getEntry(freshState, session.id)
+                  if (freshEntry && freshEntry.lastSeenArchiveTime >= archiveTime) {
+                        debug("[arch:skip:dedup] " + title + " another instance already handled archiveTime=" + archiveTime)
+                        markSeen(state, session.id, freshEntry.lastSeenTime, "", archiveTime)
+                        continue
+                  }
+                  if ((prev?.lastPushedAt ?? 0) > 0 && (prev?.lastSeenArchiveTime ?? 0) >= archiveTime) {
+                        debug("[arch:skip:already-pushed] " + title + " archiveTime=" + archiveTime + " prevArchiveTime=" + (prev?.lastSeenArchiveTime ?? 0) + " lastPushedAt=" + (prev?.lastPushedAt ?? 0))
+                        markSeen(state, session.id, prev?.lastSeenTime ?? archiveTime, prev?.lastSeenText ?? "", archiveTime)
+                        continue
+                  }
 
           // Record pendingDoneAt — done card is deferred until ARCHIVE_GRACE_MS expires.
           // If the session reactivates before then, the cancel-check above clears pendingDoneAt.
@@ -162,6 +173,18 @@ async function poll(): Promise<void> {
         if (entry?.pendingDoneAt) {
           const elapsed = Date.now() - entry.pendingDoneAt
           if (elapsed >= ARCHIVE_GRACE_MS) {
+            const archiveTimeNow = await getSessionArchiveTime(session.id)
+            const stillArchived = !!(archiveTimeNow && archiveTimeNow > 0)
+            if (!stillArchived || archiveTimeNow !== archiveTime) {
+              debug(
+                "[arch:skip:archive-mismatch] "
+                + title
+                + " expectedArchiveTime=" + archiveTime
+                + " archiveTimeNow=" + (archiveTimeNow ?? 0)
+              )
+              clearArchiveTracking(state, session.id, entry.lastSeenTime, entry.lastSeenText || "")
+              continue
+            }
             const latestPartTime = await getLatestPartTime(session.id)
             const latestStopTime = await getLatestStepFinishStopTime(session.id)
             const hasStopEvidence = latestStopTime > 0
@@ -295,6 +318,11 @@ async function poll(): Promise<void> {
 async function main(): Promise<void> {
   const version = readVersion()
   setVerbose(VERBOSE)
+  const runtimeSignature = {
+    indexHash: hashText(poll.toString()),
+    sendNotifyHash: hashText(sendNotify.toString()),
+    daemonStartedAt: DAEMON_STARTED_AT,
+  }
   info("opencode-feishu passive monitor v" + version + " starting", {
     pid: process.pid,
     node: process.version,
@@ -309,6 +337,7 @@ async function main(): Promise<void> {
     verbose: VERBOSE,
     reset: RESET,
     daemonStartedAt: DAEMON_STARTED_AT,
+    runtimeSignature,
   })
 
   if (RESET) {
