@@ -132,6 +132,34 @@ passive/src/
   - `19:23` / `19:26` / `19:29` 的 reply 证据只能归属于旧窗口，不得继续拿来指控 `PID 6508`
   - 但 `PID 6508` 仍需下一次真实用户事件验证，才能宣布 done-only 运行态真正恢复
 
+## 2026-06-06 19:42 反例补充：不要再把静态代码口径当成运行态结论
+
+- 上一节里“`PID 6508` 当前采样没有新的 `kind=reply` / `notify-state.json` 已规范化回写”的判断，随后已被**同一运行窗口**的新证据推翻。
+- 当前已坐实的反例：
+  - `PID 6508` 启动时间：`2026-06-06 19:30:17 +08:00`
+  - 该窗口内真实出现：
+    - `2026-06-06T19:37:48.482+08:00` `kind=reply`
+    - `2026-06-06T19:39:58.769+08:00` `kind=reply`
+    - `2026-06-06T19:37:49` 到 `19:38:15` 之间连续 `35` 条历史 `done` 重放
+- 同时，`passive/logs/notify-state.json` 在这次采样时也明确不是“纯新 schema”：
+  - 虽有 `_daemonStartedAt`
+  - 但 session 条目仍真实包含 legacy 字段：
+    - `lastDoneTime`
+    - `pendingDoneTime`
+- 因此新增硬规则：
+  1. **不要** 因为 `passive/src/index.ts` 看起来只写 `done`，就宣布 runtime 已 done-only。
+  2. **不要** 因为 `passive/src/notify-state.ts` 里有 `sanitizeEntry()`，就宣布磁盘 state 已稳定规范化。
+  3. 每次结论都必须同时满足：
+     - 当前最新 PID 启动线之后，没有新的 `kind=reply`
+     - 当前 `notify-state.json` 抽样确认只落 `pendingDoneAt`，不再落 `lastDoneTime` / `pendingDoneTime`
+  4. 若两者任一不满足，只能下结论为：
+     - “源码口径如此，但运行态仍未恢复”
+- 实操顺序升级为：
+  1. 先看当前 passive node PID 和启动时间
+  2. 再只看该启动时间之后的日志
+  3. 再直接读取 `passive/logs/notify-state.json` 实际落盘字段
+  4. 最后才允许写“已恢复 / 已修复”类结论
+
 ## 目录结构
 
 ```
