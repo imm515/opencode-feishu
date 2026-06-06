@@ -121,6 +121,14 @@ function pickDoneText(latestText: string, seenText: string | null | undefined): 
   return latestText.trim()
 }
 
+function hasFreshAssistantTextSince(
+  latestPartTime: number,
+  seenPartTime: number,
+  sinceTime: number,
+): boolean {
+  return Math.max(latestPartTime, seenPartTime) > sinceTime
+}
+
 function hashText(text: string): string {
   return createHash("sha1").update(text).digest("hex").slice(0, 12)
 }
@@ -520,6 +528,11 @@ async function poll(onPendingWake?: () => void): Promise<void> {
     const stopNeedsPush = latestStopTime > lastDoneStopTime
     const stopObservedDuringRuntime = latestStopTime > DAEMON_STARTED_AT
     const noPostStopParts = latestPartTime <= latestStopTime
+    const hasFreshAssistantText = hasFreshAssistantTextSince(
+      latest.time_created,
+      prev?.lastSeenTime ?? 0,
+      lastDoneStopTime,
+    )
 
     if (pendingDoneTime > 0) {
       const elapsed = Date.now() - pendingDoneTime
@@ -568,6 +581,17 @@ async function poll(onPendingWake?: () => void): Promise<void> {
         + " triggerObservedDelayMs=" + (lastTriggerMeta ? Math.max(0, lastTriggerMeta.observedAt - latestStopTime) : 0)
       )
       try {
+        if (!hasFreshAssistantText) {
+          debug(
+            "[active:skip:stale-text] "
+            + title
+            + " latestAssistantTime=" + latest.time_created
+            + " seenTime=" + (prev?.lastSeenTime ?? 0)
+            + " lastDoneStopTime=" + lastDoneStopTime
+          )
+          clearArchiveTracking(state, session.id, latest.time_created, "")
+          continue
+        }
         const doneText = pickDoneText(latest.text, prev?.lastSeenText)
         const provisionalReason = getProvisionalDoneReason(doneText)
         if (provisionalReason) {
@@ -619,13 +643,26 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       continue
     }
 
-    if (stopNeedsPush && stopObservedDuringRuntime && noPostStopParts && hasRuntimeDoneEvidence(prev)) {
+    if (stopNeedsPush && stopObservedDuringRuntime && noPostStopParts && hasRuntimeDoneEvidence(prev) && hasFreshAssistantText) {
       debug("[active:pending] " + title + " stopTime=" + latestStopTime + " — waiting " + COMPLETE_GRACE_MS + "ms before sending done")
       const entry = getEntry(state, session.id)
       if (entry) {
         ;(entry as SessionTrackEntry).pendingDoneAt = latestStopTime
         ;(entry as SessionTrackEntry).lastPendingReason = "separate-stop"
       }
+      continue
+    }
+
+    if (stopNeedsPush && stopObservedDuringRuntime && noPostStopParts && hasRuntimeDoneEvidence(prev) && !hasFreshAssistantText) {
+      debug(
+        "[active:skip:stop-without-fresh-text] "
+        + title
+        + " stopTime=" + latestStopTime
+        + " latestAssistantTime=" + latest.time_created
+        + " seenTime=" + (prev?.lastSeenTime ?? 0)
+        + " lastDoneStopTime=" + lastDoneStopTime
+      )
+      clearArchiveTracking(state, session.id, latest.time_created, prev?.lastSeenText ?? "")
       continue
     }
 
