@@ -66,9 +66,23 @@ passive/src/
 |---|---|---|
 | `working→waiting` | `part.type=text` 或 `tool.state.status=completed` 且之前为 working | ❓ OpenCode 需要你处理 |
 | `waiting→working` | 再次出现 tool(running) 或 reasoning | 🔄 OpenCode 正在继续 |
-| `any→done` | `session.time_archived` 不为空 | ✅ OpenCode 任务完成 |
+| `any→done` | 运行期内观察到真实完成，并通过静默窗口复核 | ✅ OpenCode 任务完成 |
 
-完成卡当前以 `session.time_archived` 作为唯一可信完成信号。不要再把 active session 里的 `step-finish(stop)` 当作完成推送条件，否则会出现“实际上还没结束，但先弹完成卡”的误报。
+完成卡不能再简单地“只认 `session.time_archived`”，因为用户真实使用 `opencode` 的对话式任务可以完成于 active session 而不立刻 archive；但也不能回退到“看到 active session 的 `step-finish(stop)` 就立刻发完成卡”，那样会重新引发历史 session 批量补发。当前正确边界是：
+
+- archived session：
+  - archive 进入 pending
+  - 静默窗口后再复核 archive 仍存在
+  - 且 stop 证据覆盖 archive
+  - 才允许发 `done`
+- active session：
+  - 只对**当前 daemon 运行期内新观察到**的 stop 建立 pending
+  - 静默窗口内若出现新的用户消息或新的 assistant 输出，取消 pending
+  - 只有静默窗口结束且没有继续输出时，才允许发 `done`
+
+这条边界的目标是：
+- 覆盖用户真实的对话式“已完成但未 archive”场景
+- 同时继续压住历史完成重放
 
 ## 2026-06-06 运行态校验补充
 

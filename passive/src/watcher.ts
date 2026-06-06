@@ -11,9 +11,10 @@ export class FileWatcher {
   private dbDir: string
   private dbFile: string
   private dbPrefix: string
+  private walFile: string
   private debounceMs: number
   private fallbackMs: number
-  private lastMtime: number
+  private lastSignature: string
 
   constructor(
     dbPath: string,
@@ -24,23 +25,31 @@ export class FileWatcher {
     this.dbDir = dirname(dbPath)
     this.dbFile = dbPath
     this.dbPrefix = basename(dbPath)
+    this.walFile = dbPath + "-wal"
     this.onChange = onChange
     this.debounceMs = debounceMs
     this.fallbackMs = fallbackMs
-    this.lastMtime = this.readMtime()
+    this.lastSignature = this.readSignature()
   }
 
-  private readMtime(): number {
+  private readStat(path: string): { mtimeMs: number; size: number } {
     try {
-      return statSync(this.dbFile).mtimeMs
+      const stat = statSync(path)
+      return { mtimeMs: stat.mtimeMs, size: stat.size }
     } catch {
-      return 0
+      return { mtimeMs: 0, size: 0 }
     }
+  }
+
+  private readSignature(): string {
+    const db = this.readStat(this.dbFile)
+    const wal = this.readStat(this.walFile)
+    return `${db.mtimeMs}:${db.size}|${wal.mtimeMs}:${wal.size}`
   }
 
   private relevantFile(name: string | null): boolean {
     if (!name) return true
-    return name.startsWith(this.dbPrefix)
+    return name === this.dbPrefix || name === this.dbPrefix + "-wal" || name === this.dbPrefix + "-shm"
   }
 
   private onRawEvent(event: string, filename: string | null): void {
@@ -55,11 +64,9 @@ export class FileWatcher {
 
   private fireIfChanged(): void {
     try {
-      const s = statSync(this.dbFile, { throwIfNoEntry: false })
-      if (!s) return
-      const mtime = s.mtimeMs
-      if (mtime > this.lastMtime) {
-        this.lastMtime = mtime
+      const signature = this.readSignature()
+      if (signature !== this.lastSignature) {
+        this.lastSignature = signature
         this.onChange()
       }
     } catch {

@@ -8,6 +8,7 @@ export interface SessionTrackEntry {
   lastSeenTime: number
   lastSeenText: string
   lastSeenArchiveTime: number
+  lastSeenStopTime: number
   lastPushedAt: number
   /** When this session first archived — gates the done card by ARCHIVE_GRACE_MS.
    *  Cleared when the session reactivates, or after the done card is sent.
@@ -25,7 +26,7 @@ export type NotifiedMap = Record<string, SessionTrackEntry> & {
   _daemonStartedAt?: number
 }
 
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 
 function ensureDir(): void {
   if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true })
@@ -46,6 +47,7 @@ function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
   const lastSeenTime = Number(entry.lastSeenTime ?? 0) || 0
   const lastSeenText = typeof entry.lastSeenText === "string" ? entry.lastSeenText : ""
   const lastPushedAt = Number(entry.lastPushedAt ?? 0) || 0
+  const lastSeenStopTime = Number((raw as Record<string, unknown>).lastSeenStopTime ?? 0) || 0
   // Only explicit archive markers should drive archive tracking.
   // Older state may have persisted done-only evidence in lastDoneTime, so use that
   // only when lastSeenArchiveTime itself is absent. Never infer archive state from
@@ -58,6 +60,7 @@ function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
     lastSeenTime,
     lastSeenText,
     lastSeenArchiveTime,
+    lastSeenStopTime,
     lastPushedAt,
     ...(pendingDoneAt ? { pendingDoneAt } : {}),
   }
@@ -144,12 +147,14 @@ export function recordPush(
   text: string,
   partTime: number,
   archiveTime: number,
+  stopTime = 0,
 ): void {
   const cur = map[sessionId]
   map[sessionId] = {
     lastSeenTime: partTime,
     lastSeenText: text,
     lastSeenArchiveTime: archiveTime,
+    lastSeenStopTime: Math.max(cur?.lastSeenStopTime ?? 0, stopTime),
     lastPushedAt: Date.now(),
     // pendingDoneAt intentionally cleared here — done card was sent
   }
@@ -161,12 +166,14 @@ export function markSeen(
   partTime: number,
   text: string,
   archiveTime: number,
+  stopTime = 0,
 ): void {
   const cur = map[sessionId]
   map[sessionId] = {
     lastSeenTime: partTime > (cur?.lastSeenTime ?? 0) ? partTime : (cur?.lastSeenTime ?? 0),
     lastSeenText: text,
     lastSeenArchiveTime: archiveTime || (cur?.lastSeenArchiveTime ?? 0),
+    lastSeenStopTime: Math.max(cur?.lastSeenStopTime ?? 0, stopTime),
     pendingDoneAt: cur?.pendingDoneAt,
     lastPushedAt: cur?.lastPushedAt ?? 0,
   }
@@ -186,6 +193,7 @@ export function clearArchiveTracking(
     // Active sessions must not retain archive markers; otherwise a restart can
     // treat old archived state as if it still applies to the current live session.
     lastSeenArchiveTime: 0,
+    lastSeenStopTime: cur.lastSeenStopTime ?? 0,
     lastPushedAt: cur.lastPushedAt ?? 0,
   }
 }

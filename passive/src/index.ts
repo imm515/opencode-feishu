@@ -1,4 +1,4 @@
-﻿import { loadConfig, DB_PATH, CHAT_ID, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS } from "./config.js"
+import { loadConfig, DB_PATH, CHAT_ID, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS } from "./config.js"
 import {
   getActiveSessions,
   getRecentlyArchivedSessions,
@@ -26,14 +26,13 @@ import { PKG_FILE, LOCK_FILE } from "./paths.js"
 import { FileWatcher } from "./watcher.js"
 import { createHash } from "node:crypto"
 
-const ARCHIVE_GRACE_MS = 5 * 60 * 1000
+const COMPLETE_GRACE_MS = 5 * 60 * 1000
 
 const DRY_RUN = process.argv.includes("--dry-run")
 const ONE_SHOT = process.argv.includes("--once")
 const VERBOSE = process.argv.includes("--verbose") || process.argv.includes("-v")
 const RESET = process.argv.includes("--reset-state")
 
-// Always use THIS process start time for the '"'"'session predates daemon'"'"' check.
 const DAEMON_STARTED_AT = Date.now()
 let HAS_PRIMED_CURRENT_PROCESS = false
 
@@ -62,20 +61,18 @@ function hasRuntimeDoneEvidence(entry: SessionTrackEntry | null | undefined): bo
   return seenAfterStart && hasAssistantText
 }
 
+function getPendingDoneTime(entry: SessionTrackEntry | null | undefined): number {
+  return entry?.pendingDoneAt ?? 0
+}
+
 async function poll(): Promise<void> {
   await refreshDb()
   const config = loadConfig()
   const state = loadNotifiedState()
 
-  // Prime against the current daemon process once, regardless of whether a prior
-  // state file exists. Without this, a restart can treat long-archived sessions
-  // as freshly completed and bulk-send backlog done cards.
   const isStartup = !HAS_PRIMED_CURRENT_PROCESS
   const stateStatus = isStartup ? "startup" : "running"
 
-  // Process-local priming must not inherit pending done timers from older daemon
-  // windows. Otherwise a restart can replay historical @all completions even when
-  // the current process never observed those sessions go live.
   if (isStartup) {
     for (const [sessionId, entry] of Object.entries(state)) {
       if (sessionId.startsWith("_")) continue
@@ -94,21 +91,20 @@ async function poll(): Promise<void> {
   }
 
   const activeSessions = await getActiveSessions()
-  const archivedSessions = await getRecentlyArchivedSessions(ARCHIVE_GRACE_MS)
-
-  // Build a Set of currently active/archived session IDs for cancel-check below.
+  const archivedSessions = await getRecentlyArchivedSessions(COMPLETE_GRACE_MS)
   const activeSet = new Set(activeSessions.map((s) => s.id))
 
-  // --- STEP 1: Cancel pending done if session has reactivated ---
-  // If an entry has pendingDoneAt but the session is now active (not archived),
-  // the user sent a new message — cancel the pending done.
   if (!isStartup) {
     for (const [sessionId, entry] of Object.entries(state)) {
       if (sessionId.startsWith("_")) continue
       const e = entry as SessionTrackEntry | undefined
       if (e?.pendingDoneAt && activeSet.has(sessionId)) {
-        debug("[arch:cancel:reactivated] " + sessionId.slice(0, 18) + " session is active again, cancelling pending done")
-        clearArchiveTracking(state, sessionId, e.lastSeenTime, e.lastSeenText || "")
+        const latestPartTime = await getLatestPartTime(sessionId)
+        const latestStopTime = await getLatestStepFinishStopTime(sessionId)
+        if (latestPartTime > (e.pendingDoneAt ?? 0) || latestStopTime > (e.pendingDoneAt ?? 0)) {
+          debug("[done:cancel:reactivated] " + sessionId.slice(0, 18) + " session resumed after pending done")
+          clearArchiveTracking(state, sessionId, latestPartTime, e.lastSeenText || "")
+        }
       }
     }
   }
@@ -123,34 +119,33 @@ async function poll(): Promise<void> {
   }
 
   if (isStartup) {
-    // Startup priming is a snapshot step, not normal transition processing.
-    // Rebuild active-session tracking from the live DB view so old archive markers
-    // cannot leak forward into the current daemon window.
     for (const session of activeSessions) {
       const latestPartTime = await getLatestPartTime(session.id)
+      const latestStopTime = await getLatestStepFinishStopTime(session.id)
       const prev = getEntry(state, session.id)
       state[session.id] = {
         lastSeenTime: Math.max(prev?.lastSeenTime ?? 0, latestPartTime),
         lastSeenText: "",
         lastSeenArchiveTime: 0,
+        lastSeenStopTime: Math.max(prev?.lastSeenStopTime ?? 0, latestStopTime),
         lastPushedAt: prev?.lastPushedAt ?? 0,
       }
     }
 
-    // Archived sessions seen during startup are only primed as already-known archive
-    // snapshots. They must not become pending done transitions in this daemon window.
     for (const session of archivedSessions) {
       const latestPartTime = await getLatestPartTime(session.id)
+      const latestStopTime = await getLatestStepFinishStopTime(session.id)
       const prev = getEntry(state, session.id)
       state[session.id] = {
         lastSeenTime: Math.max(prev?.lastSeenTime ?? 0, latestPartTime),
         lastSeenText: "",
         lastSeenArchiveTime: session.time_archived ?? 0,
+        lastSeenStopTime: Math.max(prev?.lastSeenStopTime ?? 0, latestStopTime),
         lastPushedAt: prev?.lastPushedAt ?? 0,
       }
     }
 
-    if (!state._schemaVersion || state._schemaVersion < 4) state._schemaVersion = 4
+    if (!state._schemaVersion || state._schemaVersion < 5) state._schemaVersion = 5
     state._daemonStartedAt = DAEMON_STARTED_AT
     if (!DRY_RUN) saveNotifiedState(state)
     HAS_PRIMED_CURRENT_PROCESS = true
@@ -169,194 +164,198 @@ async function poll(): Promise<void> {
     const prev = getEntry(state, session.id)
     const prevTime = prev?.lastSeenTime ?? 0
     const prevArchiveTime = prev?.lastSeenArchiveTime ?? 0
+    const prevStopTime = prev?.lastSeenStopTime ?? 0
 
     if (isArchived) {
-      // --- archived session ---
       if (archiveTime > prevArchiveTime) {
-        if (isStartup) {
-          const latestPartTime = await getLatestPartTime(session.id)
-          debug("[arch:prime] " + title + " archiveTime=" + archiveTime + " latestPartTime=" + latestPartTime)
-          markSeen(state, session.id, latestPartTime, "", archiveTime)
-        } else {
-          // === DEDUP: re-read state to check if another instance already handled this archive ===
-                  const freshState = loadNotifiedState()
-                  const freshEntry = getEntry(freshState, session.id)
-                  if (freshEntry && freshEntry.lastSeenArchiveTime >= archiveTime) {
-                        debug("[arch:skip:dedup] " + title + " another instance already handled archiveTime=" + archiveTime)
-                        markSeen(state, session.id, freshEntry.lastSeenTime, "", archiveTime)
-                        continue
-                  }
-                  if ((prev?.lastPushedAt ?? 0) > 0 && (prev?.lastSeenArchiveTime ?? 0) >= archiveTime) {
-                        debug("[arch:skip:already-pushed] " + title + " archiveTime=" + archiveTime + " prevArchiveTime=" + (prev?.lastSeenArchiveTime ?? 0) + " lastPushedAt=" + (prev?.lastPushedAt ?? 0))
-                        markSeen(state, session.id, prev?.lastSeenTime ?? archiveTime, prev?.lastSeenText ?? "", archiveTime)
-                        continue
-                  }
-
-          // Record pendingDoneAt — done card is deferred until ARCHIVE_GRACE_MS expires.
-          // If the session reactivates before then, the cancel-check above clears pendingDoneAt.
-          const daemonSeenLive = hasRuntimeDoneEvidence(prev)
-          if (!daemonSeenLive) {
-            debug(
-              "[arch:skip:no-runtime-evidence] "
-              + title
-              + " archiveTime=" + archiveTime
-              + " prevSeen=" + (prev?.lastSeenTime ?? 0)
-              + " textLen=" + ((prev?.lastSeenText ?? "").trim().length)
-              + " daemonStart=" + DAEMON_STARTED_AT
-            )
-            markSeen(state, session.id, prev?.lastSeenTime ?? archiveTime, prev?.lastSeenText ?? "", archiveTime)
-            continue
-          }
-
-          debug("[arch:pending] " + title + " archiveTime=" + archiveTime + " — waiting " + ARCHIVE_GRACE_MS + "ms before sending done")
-          const prevTimeVal = prev?.lastSeenTime ?? 0
-          const prevTextVal = prev?.lastSeenText ?? ""
-          markSeen(state, session.id, prevTimeVal, prevTextVal, archiveTime)
-          // Set pendingDoneAt on the entry just written
-          const entry = getEntry(state, session.id)
-          if (entry) (entry as SessionTrackEntry).pendingDoneAt = archiveTime
-        }
-      } else {
-        // Session is still archived — check if the pending done timer has expired.
-        const entry = prev as SessionTrackEntry | null
-        if (entry?.pendingDoneAt) {
-          const elapsed = Date.now() - entry.pendingDoneAt
-          if (elapsed >= ARCHIVE_GRACE_MS) {
-            const archiveTimeNow = await getSessionArchiveTime(session.id)
-            const stillArchived = !!(archiveTimeNow && archiveTimeNow > 0)
-            if (!stillArchived || archiveTimeNow !== archiveTime) {
-              debug(
-                "[arch:skip:archive-mismatch] "
-                + title
-                + " expectedArchiveTime=" + archiveTime
-                + " archiveTimeNow=" + (archiveTimeNow ?? 0)
-              )
-              clearArchiveTracking(state, session.id, entry.lastSeenTime, entry.lastSeenText || "")
-              continue
-            }
-            const latestPartTime = await getLatestPartTime(session.id)
-            const latestStopTime = await getLatestStepFinishStopTime(session.id)
-            const hasStopEvidence = latestStopTime > 0
-            const stopCoversArchive = latestStopTime >= archiveTime
-            const noPostArchiveParts = latestPartTime <= archiveTime
-
-            if (!hasStopEvidence || !stopCoversArchive || !noPostArchiveParts) {
-              debug(
-                "[arch:skip:not-final] "
-                + title
-                + " latestPartTime=" + latestPartTime
-                + " latestStopTime=" + latestStopTime
-                + " archiveTime=" + archiveTime
-                + " hasStopEvidence=" + hasStopEvidence
-                + " stopCoversArchive=" + stopCoversArchive
-                + " noPostArchiveParts=" + noPostArchiveParts
-              )
-              continue
-            }
-
-            // Timer expired and archive still looks final — send the done card.
-            debug(
-              "[arch:fire:done] "
-              + title
-              + " elapsed=" + elapsed + "ms >= " + ARCHIVE_GRACE_MS + "ms"
-              + " latestPartTime=" + latestPartTime
-              + " latestStopTime=" + latestStopTime
-            )
-            try {
-              const latest = await getLatestAssistantPart(session.id)
-              const latestText = latest?.text ?? ""
-              debug("[arch:done] " + title + " textLen=" + latestText.length)
-              if (!DRY_RUN) {
-                await sendNotify({
-                  appId: config.appId,
-                  appSecret: config.appSecret,
-                  sessionId: session.id,
-                  sessionTitle: session.title,
-                  kind: "done",
-                  text: latestText || null,
-                  archiveTime,
-                  textTime: latest?.time_created ?? null,
-                })
-              }
-              const partTimeForState = latest?.time_created ?? archiveTime
-              recordPush(state, session.id, latestText, partTimeForState, archiveTime)
-              pushes++
-              detailLines.push("done: " + title)
-            } catch (err) {
-              error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
-            }
-          } else {
-            debug("[arch:wait] " + title + " pendingDoneAt=" + entry.pendingDoneAt + " elapsed=" + elapsed + "ms — still waiting")
-          }
-        } else {
-          debug("[arch:skip] " + title + " archiveTime=" + archiveTime + " <= prevArchiveTime=" + prevArchiveTime + " no pendingDoneAt")
-        }
-      }
-    } else {
-      // --- active session ---
-      if (isStartup) {
-        const letP = await getLatestPartTime(session.id)
-        debug("[active:prime] " + title + " latestPartTime=" + letP)
-        markSeen(state, session.id, letP, "", 0)
-        clearArchiveTracking(state, session.id, letP, "")
-        continue
-      }
-
-      const latest = await getLatestAssistantPart(session.id)
-
-      if (!latest) {
-        debug("[active:skip] " + title + " no assistant text part found")
-        const partTime = await getLatestPartTime(session.id)
-        markSeen(state, session.id, partTime, "", 0)
-        clearArchiveTracking(state, session.id, partTime, "")
-        continue
-      }
-
-      const latestTime = latest.time_created
-
-      // Skip parts that existed before this daemon process started.
-      if (latestTime <= DAEMON_STARTED_AT) {
-        debug("[active:skip:old] " + title + " latestTime=" + latestTime + " daemonStart=" + DAEMON_STARTED_AT)
-        markSeen(state, session.id, latestTime, "", 0)
-        clearArchiveTracking(state, session.id, latestTime, "")
-        continue
-      }
-
-      const hasNew = latestTime > prevTime
-      const ctxLatest = await getLatestPartTime(session.id)
-      debug("[active:check] " + title + " latestTime=" + latestTime + " hasNew=" + hasNew + " latestPart=" + ctxLatest)
-
-      if (hasNew && latest.text.trim()) {
-        // === DEDUP: re-read state to check if another instance already pushed ===
         const freshState = loadNotifiedState()
         const freshEntry = getEntry(freshState, session.id)
-        if (freshEntry && freshEntry.lastSeenTime >= latestTime) {
-          debug("[active:skip:dedup] " + title + " another instance already pushed latestTime=" + latestTime)
-          markSeen(state, session.id, latestTime, "", 0)
+        if (freshEntry && freshEntry.lastSeenArchiveTime >= archiveTime) {
+          debug("[arch:skip:dedup] " + title + " another instance already handled archiveTime=" + archiveTime)
+          markSeen(state, session.id, freshEntry.lastSeenTime, freshEntry.lastSeenText, archiveTime, freshEntry.lastSeenStopTime)
           continue
         }
 
-        // Passive mode tracks new text for done detection only.
-        // No intermediate reply card is pushed.
-        const joined = await getAssistantTextSince(session.id, prevTime)
-        const replyText = joined.text.trim() || latest.text.trim()
-        const replyTime = joined.latestTime
-        debug("[active:assemble] " + title + " chunks=" + joined.chunkCount + " len=" + replyText.length + " replyTime=" + replyTime)
-        markSeen(state, session.id, replyTime, replyText, 0)
-        clearArchiveTracking(state, session.id, replyTime, replyText)
-        debug("[active:skip:reply_push_disabled] " + title)
-      } else if (hasNew) {
-        debug("[active:skip:empty] " + title + " latestTime=" + latestTime + " text is empty")
-        markSeen(state, session.id, latestTime, "", 0)
-        clearArchiveTracking(state, session.id, latestTime, "")
-      } else {
-        markSeen(state, session.id, latestTime, "", 0)
-        clearArchiveTracking(state, session.id, latestTime, "")
+        const latestStopTime = await getLatestStepFinishStopTime(session.id)
+        const daemonSeenLive = hasRuntimeDoneEvidence(prev)
+        if (!daemonSeenLive && latestStopTime <= DAEMON_STARTED_AT) {
+          debug("[arch:skip:no-runtime-evidence] " + title + " archiveTime=" + archiveTime + " stopTime=" + latestStopTime)
+          markSeen(state, session.id, prev?.lastSeenTime ?? archiveTime, prev?.lastSeenText ?? "", archiveTime, latestStopTime)
+          continue
+        }
+
+        debug("[arch:pending] " + title + " archiveTime=" + archiveTime + " — waiting " + COMPLETE_GRACE_MS + "ms before sending done")
+        markSeen(state, session.id, prev?.lastSeenTime ?? archiveTime, prev?.lastSeenText ?? "", archiveTime, latestStopTime)
+        const entry = getEntry(state, session.id)
+        if (entry) (entry as SessionTrackEntry).pendingDoneAt = archiveTime
+        continue
       }
+
+      const entry = prev as SessionTrackEntry | null
+      const pendingDoneTime = getPendingDoneTime(entry)
+      if (!pendingDoneTime) {
+        debug("[arch:skip] " + title + " archiveTime=" + archiveTime + " <= prevArchiveTime=" + prevArchiveTime + " no pendingDoneAt")
+        continue
+      }
+
+      const elapsed = Date.now() - pendingDoneTime
+      if (elapsed < COMPLETE_GRACE_MS) {
+        debug("[arch:wait] " + title + " pendingDoneAt=" + pendingDoneTime + " elapsed=" + elapsed + "ms — still waiting")
+        continue
+      }
+
+      const archiveTimeNow = await getSessionArchiveTime(session.id)
+      const stillArchived = !!(archiveTimeNow && archiveTimeNow > 0)
+      if (!stillArchived || archiveTimeNow !== archiveTime) {
+        debug("[arch:skip:archive-mismatch] " + title + " expectedArchiveTime=" + archiveTime + " archiveTimeNow=" + (archiveTimeNow ?? 0))
+        clearArchiveTracking(state, session.id, entry?.lastSeenTime, entry?.lastSeenText || "")
+        continue
+      }
+
+      const latestPartTime = await getLatestPartTime(session.id)
+      const latestStopTime = await getLatestStepFinishStopTime(session.id)
+      const hasStopEvidence = latestStopTime > 0
+      const stopCoversArchive = latestStopTime >= archiveTime
+      const noPostArchiveParts = latestPartTime <= archiveTime
+
+      if (!hasStopEvidence || !stopCoversArchive || !noPostArchiveParts) {
+        debug(
+          "[arch:skip:not-final] "
+          + title
+          + " latestPartTime=" + latestPartTime
+          + " latestStopTime=" + latestStopTime
+          + " archiveTime=" + archiveTime
+        )
+        continue
+      }
+
+      debug("[arch:fire:done] " + title + " elapsed=" + elapsed + "ms latestPartTime=" + latestPartTime + " latestStopTime=" + latestStopTime)
+      try {
+        const latest = await getLatestAssistantPart(session.id)
+        const latestText = latest?.text ?? ""
+        if (!DRY_RUN) {
+          await sendNotify({
+            appId: config.appId,
+            appSecret: config.appSecret,
+            sessionId: session.id,
+            sessionTitle: session.title,
+            kind: "done",
+            text: latestText || null,
+            archiveTime,
+            textTime: latest?.time_created ?? null,
+          })
+        }
+        recordPush(state, session.id, latestText, latest?.time_created ?? archiveTime, archiveTime, latestStopTime)
+        pushes++
+        detailLines.push("done: " + title)
+      } catch (err) {
+        error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
+      }
+      continue
     }
+
+    const latest = await getLatestAssistantPart(session.id)
+    const latestPartTime = await getLatestPartTime(session.id)
+    const latestStopTime = await getLatestStepFinishStopTime(session.id)
+
+    if (!latest) {
+      debug("[active:skip] " + title + " no assistant text part found")
+      markSeen(state, session.id, latestPartTime, "", 0, latestStopTime)
+      clearArchiveTracking(state, session.id, latestPartTime, "")
+      continue
+    }
+
+    const latestTime = latest.time_created
+    if (latestTime <= DAEMON_STARTED_AT) {
+      debug("[active:skip:old] " + title + " latestTime=" + latestTime + " daemonStart=" + DAEMON_STARTED_AT)
+      markSeen(state, session.id, latestTime, "", 0, latestStopTime)
+      clearArchiveTracking(state, session.id, latestTime, "")
+      continue
+    }
+
+    const hasNew = latestTime > prevTime
+    debug("[active:check] " + title + " latestTime=" + latestTime + " hasNew=" + hasNew + " latestPart=" + latestPartTime + " latestStopTime=" + latestStopTime)
+
+    if (hasNew && latest.text.trim()) {
+      const freshState = loadNotifiedState()
+      const freshEntry = getEntry(freshState, session.id)
+      if (freshEntry && freshEntry.lastSeenTime >= latestTime) {
+        debug("[active:skip:dedup] " + title + " another instance already handled latestTime=" + latestTime)
+        markSeen(state, session.id, latestTime, "", 0, latestStopTime)
+        continue
+      }
+
+      const joined = await getAssistantTextSince(session.id, prevTime)
+      const replyText = joined.text.trim() || latest.text.trim()
+      const replyTime = joined.latestTime
+      debug("[active:assemble] " + title + " chunks=" + joined.chunkCount + " len=" + replyText.length + " replyTime=" + replyTime)
+      markSeen(state, session.id, replyTime, replyText, 0, latestStopTime)
+      clearArchiveTracking(state, session.id, replyTime, replyText)
+      debug("[active:skip:reply_push_disabled] " + title)
+      continue
+    }
+
+    if (hasNew) {
+      debug("[active:skip:empty] " + title + " latestTime=" + latestTime + " text is empty")
+      markSeen(state, session.id, latestTime, "", 0, latestStopTime)
+      clearArchiveTracking(state, session.id, latestTime, "")
+      continue
+    }
+
+    markSeen(state, session.id, latestTime, prev?.lastSeenText ?? "", 0, latestStopTime)
+
+    const pendingDoneTime = getPendingDoneTime(prev)
+    const stopAdvanced = latestStopTime > prevStopTime
+    const stopObservedDuringRuntime = latestStopTime > DAEMON_STARTED_AT
+    const noPostStopParts = latestPartTime <= latestStopTime
+
+    if (pendingDoneTime > 0) {
+      const elapsed = Date.now() - pendingDoneTime
+      if (!noPostStopParts) {
+        debug("[active:cancel:post-stop-output] " + title + " latestPartTime=" + latestPartTime + " latestStopTime=" + latestStopTime)
+        clearArchiveTracking(state, session.id, latestPartTime, prev?.lastSeenText ?? "")
+        continue
+      }
+
+      if (elapsed < COMPLETE_GRACE_MS) {
+        debug("[active:wait] " + title + " pendingDoneAt=" + pendingDoneTime + " elapsed=" + elapsed + "ms")
+        continue
+      }
+
+      debug("[active:fire:done] " + title + " elapsed=" + elapsed + "ms latestStopTime=" + latestStopTime)
+      try {
+        if (!DRY_RUN) {
+          await sendNotify({
+            appId: config.appId,
+            appSecret: config.appSecret,
+            sessionId: session.id,
+            sessionTitle: session.title,
+            kind: "done",
+            text: latest.text || null,
+            archiveTime: null,
+            textTime: latest.time_created ?? null,
+          })
+        }
+        recordPush(state, session.id, latest.text, latest.time_created, 0, latestStopTime)
+        pushes++
+        detailLines.push("done: " + title)
+      } catch (err) {
+        error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
+      }
+      continue
+    }
+
+    if (stopAdvanced && stopObservedDuringRuntime && noPostStopParts && hasRuntimeDoneEvidence(prev)) {
+      debug("[active:pending] " + title + " stopTime=" + latestStopTime + " — waiting " + COMPLETE_GRACE_MS + "ms before sending done")
+      const entry = getEntry(state, session.id)
+      if (entry) (entry as SessionTrackEntry).pendingDoneAt = latestStopTime
+      continue
+    }
+
+    clearArchiveTracking(state, session.id, latestTime, prev?.lastSeenText ?? "")
   }
 
-  if (!state._schemaVersion || state._schemaVersion < 4) state._schemaVersion = 4
+  if (!state._schemaVersion || state._schemaVersion < 5) state._schemaVersion = 5
   state._daemonStartedAt = DAEMON_STARTED_AT
   if (!DRY_RUN) saveNotifiedState(state)
   HAS_PRIMED_CURRENT_PROCESS = true
@@ -380,7 +379,7 @@ async function main(): Promise<void> {
     watchDebounceMs: WATCH_DEBOUNCE_MS,
     fallbackCheckMs: FALLBACK_CHECK_MS,
     chatId: CHAT_ID,
-    archiveGraceMs: ARCHIVE_GRACE_MS,
+    archiveGraceMs: COMPLETE_GRACE_MS,
     dryRun: DRY_RUN,
     oneShot: ONE_SHOT,
     verbose: VERBOSE,
@@ -391,11 +390,13 @@ async function main(): Promise<void> {
 
   if (RESET) {
     try {
-      const { unlinkSync } = await import("node:fs")
+      const { unlinkSync: fsUnlink } = await import("node:fs")
       const { STATE_FILE } = await import("./paths.js")
-      unlinkSync(STATE_FILE)
+      fsUnlink(STATE_FILE)
       info("[reset] state file deleted")
-    } catch {/* skip */ }
+    } catch {
+      /* skip */
+    }
   }
 
   try {
@@ -406,7 +407,6 @@ async function main(): Promise<void> {
     process.exit(2)
   }
 
-  // Single-instance lock via exclusive file create (OS-atomic on Windows)
   function acquireLock(): boolean {
     try {
       const fd = openSync(LOCK_FILE, "wx")
@@ -418,28 +418,47 @@ async function main(): Promise<void> {
       return false
     }
   }
+
   if (!acquireLock()) {
     try {
       const existingPid = parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10)
       if (!isNaN(existingPid)) {
-        try { process.kill(existingPid, 0); info("Another daemon (PID " + existingPid + ") is running, exiting"); process.exit(0) }
-        catch { /* stale lock */ }
+        try {
+          process.kill(existingPid, 0)
+          info("Another daemon (PID " + existingPid + ") is running, exiting")
+          process.exit(0)
+        } catch {
+          /* stale lock */
+        }
       }
-    } catch { /* skip */ }
+    } catch {
+      /* skip */
+    }
     unlinkSync(LOCK_FILE)
-    if (!acquireLock()) { error("Cannot acquire lock even after removing stale file"); process.exit(3) }
+    if (!acquireLock()) {
+      error("Cannot acquire lock even after removing stale file")
+      process.exit(3)
+    }
   }
   info("Lock acquired, PID " + process.pid)
 
-  // Event-driven watcher (Layer 1+2) + fallback timer (Layer 3)
   let pollInFlight = false
-  const watcher = new FileWatcher(DB_PATH, async () => {
-    if (pollInFlight) return
-    pollInFlight = true
-    try { await poll() }
-    catch (err) { error("Poll error", { e: err instanceof Error ? err.message : String(err) }) }
-    finally { pollInFlight = false }
-  }, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS)
+  const watcher = new FileWatcher(
+    DB_PATH,
+    async () => {
+      if (pollInFlight) return
+      pollInFlight = true
+      try {
+        await poll()
+      } catch (err) {
+        error("Poll error", { e: err instanceof Error ? err.message : String(err) })
+      } finally {
+        pollInFlight = false
+      }
+    },
+    WATCH_DEBOUNCE_MS,
+    FALLBACK_CHECK_MS,
+  )
   watcher.start()
 
   const shutdown = (sig: string) => {
@@ -452,15 +471,17 @@ async function main(): Promise<void> {
         unlinkSync(LOCK_FILE)
         info("Lock released")
       }
-    } catch {}
+    } catch {
+      /* skip */
+    }
     process.exit(0)
   }
+
   process.on("SIGINT", () => shutdown("SIGINT"))
-  process.on("SIGTERM" , () => shutdown("SIGTERM"))
+  process.on("SIGTERM", () => shutdown("SIGTERM"))
   process.on("uncaughtException", (err) => error("uncaught", { e: err.message, s: err.stack }))
   process.on("unhandledRejection", (r) => error("unhandled", { r: String(r) }))
 
-  // Initial poll on startup
   await poll()
   if (ONE_SHOT) {
     info("--once, exiting")
@@ -468,11 +489,15 @@ async function main(): Promise<void> {
     try {
       const currentPid = parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10)
       if (currentPid === process.pid) unlinkSync(LOCK_FILE)
-    } catch {}
+    } catch {
+      /* skip */
+    }
     process.exit(0)
   }
   info("Daemon running, watching " + DB_PATH + " (debounce=" + WATCH_DEBOUNCE_MS + "ms, fallback=" + FALLBACK_CHECK_MS + "ms)")
 }
 
-main().catch((err) => { error("Fatal", { e: err.message }); process.exit(1) })
-// MARKER
+main().catch((err) => {
+  error("Fatal", { e: err.message })
+  process.exit(1)
+})
