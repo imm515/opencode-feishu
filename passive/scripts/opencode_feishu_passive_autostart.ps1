@@ -37,7 +37,8 @@ function Send-FeishuPush([string]$Title, [string]$Body) {
       msg_type = 'text'
       content  = @{ text = $text }
     } | ConvertTo-Json -Depth 5 -Compress
-    Invoke-RestMethod -Method Post -Uri $WebhookUrl -ContentType 'application/json; charset=utf-8' -Body $payload -TimeoutSec 15 | Out-Null
+    $utf8Body = [System.Text.Encoding]::UTF8.GetBytes($payload)
+    Invoke-RestMethod -Method Post -Uri $WebhookUrl -ContentType 'application/json; charset=utf-8' -Body $utf8Body -TimeoutSec 15 | Out-Null
   } catch {
     Write-Step "  [warn] push notification failed: $($_.Exception.Message)" 'Yellow'
   }

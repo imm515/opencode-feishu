@@ -116,8 +116,9 @@ function Send-FeishuPush([string]$Title, [string]$Body) {
         if (-not $token) { throw "No token" }
         $text = "$Title`n$Body"
         $msgBody = @{ receive_id = $FeishuChatId; msg_type = "text"; content = (@{ text = $text } | ConvertTo-Json -Depth 3 -Compress) } | ConvertTo-Json -Depth 5 -Compress
-        $headers = @{ Authorization = "Bearer $token"; "Content-Type" = "application/json" }
-        $null = Invoke-RestMethod -Method Post -Uri "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id" -Headers $headers -Body $msgBody -TimeoutSec 15
+        $headers = @{ Authorization = "Bearer $token" }
+        $utf8Body = [System.Text.Encoding]::UTF8.GetBytes($msgBody)
+        $null = Invoke-RestMethod -Method Post -Uri "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id" -Headers $headers -ContentType "application/json; charset=utf-8" -Body $utf8Body -TimeoutSec 15
     } catch {
         Write-Host "  [warn] push notification failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
