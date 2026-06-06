@@ -1,8 +1,13 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { LOG_DIR } from "./paths.js"
 
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+const CONTENT_PRUNE_FILES = new Set([
+  "passive.err.log",
+  "passive.out.log",
+  "passive.log",
+])
 
 function ensureLogDir() {
   if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true })
@@ -15,16 +20,57 @@ function logFile() {
 
 function logPath() { return join(LOG_DIR, logFile()) }
 
+function parseLeadingTsMs(line: string): number {
+  const m = line.match(/^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2})\]/)
+  if (!m) return 0
+  const ts = Date.parse(m[1])
+  return Number.isFinite(ts) ? ts : 0
+}
+
+function pruneFileContent(path: string, cutoff: number): void {
+  try {
+    const raw = readFileSync(path, "utf-8")
+    if (!raw.trim()) return
+    const lines = raw.split(/\r?\n/)
+    const kept: string[] = []
+    let hasTimestampedContent = false
+    for (const line of lines) {
+      if (!line) continue
+      const ts = parseLeadingTsMs(line)
+      if (ts > 0) {
+        hasTimestampedContent = true
+        if (ts >= cutoff) kept.push(line)
+        continue
+      }
+      // Keep non-timestamp trailer lines only when we are also keeping newer timestamped context.
+      if (kept.length > 0) kept.push(line)
+    }
+    if (!hasTimestampedContent) {
+      const age = Date.now() - statSync(path).mtimeMs
+      if (age > MAX_AGE_MS) unlinkSync(path)
+      return
+    }
+    const next = kept.length > 0 ? kept.join("\n") + "\n" : ""
+    if (next !== raw) writeFileSync(path, next, "utf-8")
+  } catch { /* skip */ }
+}
+
 function prune() {
   ensureLogDir()
   const now = Date.now()
+  const cutoff = now - MAX_AGE_MS
   try {
     for (const f of readdirSync(LOG_DIR)) {
       const isDailyLog = /^\d{4}-\d{2}-\d{2}\.log$/.test(f)
       const isRotateLog = f.startsWith("rotate-")
+      const full = join(LOG_DIR, f)
+      if (CONTENT_PRUNE_FILES.has(f)) {
+        pruneFileContent(full, cutoff)
+        continue
+      }
       if (!isDailyLog && !isRotateLog) continue
-      const age = now - statSync(join(LOG_DIR, f)).mtimeMs
-      if (age > MAX_AGE_MS) unlinkSync(join(LOG_DIR, f))
+      const age = now - statSync(full).mtimeMs
+      if (age > MAX_AGE_MS) unlinkSync(full)
     }
   } catch { /* skip */ }
 }

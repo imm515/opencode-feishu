@@ -70,6 +70,14 @@ export interface PartChunk {
   time_created: number
 }
 
+export interface LatestPartMeta {
+  time_created: number
+  time_updated: number
+  type: string | null
+  reason: string | null
+  tool: string | null
+}
+
 export async function getLatestPartTime(sessionId: string): Promise<number> {
   const db = getDb()
   const stmt = db.prepare("SELECT MAX(time_created) AS max_time FROM part WHERE session_id = ?")
@@ -86,6 +94,20 @@ export async function getLatestStepFinishStopTime(sessionId: string): Promise<nu
   )
   const row = stmt.get(sessionId) as { max_time: number | null } | undefined
   return row?.max_time ?? 0
+}
+
+export async function getLatestPartMeta(sessionId: string): Promise<LatestPartMeta | null> {
+  const db = getDb()
+  const stmt = db.prepare(
+    "SELECT p.time_created, p.time_updated, " +
+    "json_extract(p.data, '$.type') AS type, " +
+    "json_extract(p.data, '$.reason') AS reason, " +
+    "json_extract(p.data, '$.tool') AS tool " +
+    "FROM part AS p WHERE p.session_id = ? " +
+    "ORDER BY p.time_created DESC LIMIT 1"
+  )
+  const row = stmt.get(sessionId) as LatestPartMeta | undefined
+  return row ?? null
 }
 
 export async function getLatestAssistantPart(sessionId: string): Promise<LatestPartInfo | null> {

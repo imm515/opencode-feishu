@@ -5,6 +5,7 @@ import {
   getLatestAssistantPart,
   getAssistantTextSince,
   getLatestPartTime,
+  getLatestPartMeta,
   getLatestStepFinishStopTime,
   getSessionArchiveTime,
   closeDb,
@@ -31,6 +32,7 @@ const ONE_SHOT = process.argv.includes("--once")
 const VERBOSE = process.argv.includes("--verbose") || process.argv.includes("-v")
 const RESET = process.argv.includes("--reset-state")
 const DEBUG_MODE = COMPLETE_GRACE_MS < 300_000 || VERBOSE || DRY_RUN || ONE_SHOT
+const STARTUP_CATCHUP_WINDOW_MS = Math.max(COMPLETE_GRACE_MS * 4, 10 * 60 * 1000)
 
 const DAEMON_STARTED_AT = Date.now()
 let HAS_PRIMED_CURRENT_PROCESS = false
@@ -65,6 +67,14 @@ function getPendingDoneTime(entry: SessionTrackEntry | null | undefined): number
   return entry?.pendingDoneAt ?? 0
 }
 
+function getLastDoneStopTime(entry: SessionTrackEntry | null | undefined): number {
+  return entry?.lastDoneStopTime ?? 0
+}
+
+function getPendingReason(entry: SessionTrackEntry | null | undefined): string {
+  return entry?.lastPendingReason ?? "unknown"
+}
+
 function wasDoneAlreadyPushed(
   sessionId: string,
   eventTime: number,
@@ -75,9 +85,9 @@ function wasDoneAlreadyPushed(
   if (!freshEntry) return null
 
   const pushedAt = freshEntry.lastPushedAt ?? 0
-  const seenTime = freshEntry.lastSeenTime ?? 0
-  const seenStopTime = freshEntry.lastSeenStopTime ?? 0
-  if (pushedAt > 0 && seenTime >= eventTime && seenStopTime >= stopTime) {
+  const donePartTime = freshEntry.lastDonePartTime ?? 0
+  const doneStopTime = freshEntry.lastDoneStopTime ?? 0
+  if (pushedAt > 0 && donePartTime >= eventTime && doneStopTime >= stopTime) {
     return freshEntry
   }
   return null
@@ -171,13 +181,37 @@ async function poll(onPendingWake?: () => void): Promise<void> {
     for (const session of activeSessions) {
       const latestPartTime = await getLatestPartTime(session.id)
       const latestStopTime = await getLatestStepFinishStopTime(session.id)
+      const latest = await getLatestAssistantPart(session.id)
       const prev = getEntry(state, session.id)
+      const lastDoneStopTime = getLastDoneStopTime(prev)
+      const noPostStopParts = latestPartTime <= latestStopTime
+      const stopNeedsCatchup = latestStopTime > lastDoneStopTime
+      const stopIsRecent = latestStopTime > 0 && (Date.now() - latestStopTime) <= STARTUP_CATCHUP_WINDOW_MS
       state[session.id] = {
         lastSeenTime: Math.max(prev?.lastSeenTime ?? 0, latestPartTime),
-        lastSeenText: "",
+        lastSeenText: prev?.lastSeenText ?? "",
         lastSeenArchiveTime: 0,
         lastSeenStopTime: Math.max(prev?.lastSeenStopTime ?? 0, latestStopTime),
         lastPushedAt: prev?.lastPushedAt ?? 0,
+        lastDonePartTime: prev?.lastDonePartTime,
+        lastDoneStopTime: prev?.lastDoneStopTime,
+      }
+      if (latest?.text?.trim() && stopNeedsCatchup && stopIsRecent && noPostStopParts) {
+        const joined = await getAssistantTextSince(session.id, lastDoneStopTime > 0 ? lastDoneStopTime : 0)
+        const catchupText = joined.text.trim() || latest.text.trim()
+        markSeen(state, session.id, joined.latestTime || latest.time_created, catchupText, 0, latestStopTime)
+        const entry = getEntry(state, session.id)
+        if (entry) {
+          ;(entry as SessionTrackEntry).pendingDoneAt = latestStopTime
+          ;(entry as SessionTrackEntry).lastPendingReason = "startup-catchup"
+        }
+        debug(
+          "[startup:catchup-pending] "
+          + shortTitle(session.title, session.id)
+          + " stopTime=" + latestStopTime
+          + " recentWindowMs=" + STARTUP_CATCHUP_WINDOW_MS
+          + " textLen=" + catchupText.length
+        )
       }
     }
 
@@ -187,14 +221,16 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       const prev = getEntry(state, session.id)
       state[session.id] = {
         lastSeenTime: Math.max(prev?.lastSeenTime ?? 0, latestPartTime),
-        lastSeenText: "",
+        lastSeenText: prev?.lastSeenText ?? "",
         lastSeenArchiveTime: session.time_archived ?? 0,
         lastSeenStopTime: Math.max(prev?.lastSeenStopTime ?? 0, latestStopTime),
         lastPushedAt: prev?.lastPushedAt ?? 0,
+        lastDonePartTime: prev?.lastDonePartTime,
+        lastDoneStopTime: prev?.lastDoneStopTime,
       }
     }
 
-    if (!state._schemaVersion || state._schemaVersion < 5) state._schemaVersion = 5
+    if (!state._schemaVersion || state._schemaVersion < 6) state._schemaVersion = 6
     state._daemonStartedAt = DAEMON_STARTED_AT
     if (!DRY_RUN) saveNotifiedState(state)
     HAS_PRIMED_CURRENT_PROCESS = true
@@ -237,7 +273,10 @@ async function poll(onPendingWake?: () => void): Promise<void> {
         debug("[arch:pending] " + title + " archiveTime=" + archiveTime + " — waiting " + COMPLETE_GRACE_MS + "ms before sending done")
         markSeen(state, session.id, prev?.lastSeenTime ?? archiveTime, prev?.lastSeenText ?? "", archiveTime, latestStopTime)
         const entry = getEntry(state, session.id)
-        if (entry) (entry as SessionTrackEntry).pendingDoneAt = archiveTime
+        if (entry) {
+          ;(entry as SessionTrackEntry).pendingDoneAt = archiveTime
+          ;(entry as SessionTrackEntry).lastPendingReason = "archive"
+        }
         continue
       }
 
@@ -358,13 +397,17 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       const replyTime = joined.latestTime
       debug("[active:assemble] " + title + " chunks=" + joined.chunkCount + " len=" + replyText.length + " replyTime=" + replyTime)
       markSeen(state, session.id, replyTime, replyText, 0, latestStopTime)
-      const stopAdvancedNow = latestStopTime > prevStopTime
+      const lastDoneStopTime = getLastDoneStopTime(prev)
+      const stopAdvancedNow = latestStopTime > Math.max(prevStopTime, lastDoneStopTime)
       const stopObservedDuringRuntimeNow = latestStopTime > DAEMON_STARTED_AT
       const noPostStopPartsNow = latestPartTime <= latestStopTime
       if (stopAdvancedNow && stopObservedDuringRuntimeNow && noPostStopPartsNow) {
         debug("[active:pending:same-poll] " + title + " stopTime=" + latestStopTime + " replyTime=" + replyTime + " — waiting " + COMPLETE_GRACE_MS + "ms before sending done")
         const entry = getEntry(state, session.id)
-        if (entry) (entry as SessionTrackEntry).pendingDoneAt = latestStopTime
+        if (entry) {
+          ;(entry as SessionTrackEntry).pendingDoneAt = latestStopTime
+          ;(entry as SessionTrackEntry).lastPendingReason = "same-poll-stop"
+        }
       } else {
         debug(
           "[active:no-done-evidence] "
@@ -392,25 +435,53 @@ async function poll(onPendingWake?: () => void): Promise<void> {
     markSeen(state, session.id, latestTime, prev?.lastSeenText ?? "", 0, latestStopTime)
 
     const pendingDoneTime = getPendingDoneTime(prev)
-    const stopAdvanced = latestStopTime > prevStopTime
+    const lastDoneStopTime = getLastDoneStopTime(prev)
+    const stopAdvanced = latestStopTime > Math.max(prevStopTime, lastDoneStopTime)
+    const stopNeedsPush = latestStopTime > lastDoneStopTime
     const stopObservedDuringRuntime = latestStopTime > DAEMON_STARTED_AT
     const noPostStopParts = latestPartTime <= latestStopTime
 
     if (pendingDoneTime > 0) {
       const elapsed = Date.now() - pendingDoneTime
+      const pendingReason = getPendingReason(prev)
+      const latestMeta = await getLatestPartMeta(session.id)
       if (!noPostStopParts) {
-        debug("[active:cancel:post-stop-output] " + title + " latestPartTime=" + latestPartTime + " latestStopTime=" + latestStopTime)
+        const resumeAfterStopMs = latestPartTime - pendingDoneTime
+        debug(
+          "[active:cancel:post-stop-output] "
+          + title
+          + " pendingReason=" + pendingReason
+          + " quietForMs=" + elapsed
+          + " resumeAfterStopMs=" + resumeAfterStopMs
+          + " latestPartTime=" + latestPartTime
+          + " latestStopTime=" + latestStopTime
+          + " resumedType=" + (latestMeta?.type ?? "")
+          + " resumedReason=" + (latestMeta?.reason ?? "")
+          + " resumedTool=" + (latestMeta?.tool ?? "")
+        )
         clearArchiveTracking(state, session.id, latestPartTime, prev?.lastSeenText ?? "")
         continue
       }
 
       if (elapsed < COMPLETE_GRACE_MS) {
         const remaining = COMPLETE_GRACE_MS - elapsed
-        debug("[active:wait] " + title + " pendingDoneAt=" + pendingDoneTime + " elapsed=" + elapsed + "ms remaining=" + remaining + "ms")
+        debug(
+          "[active:wait] "
+          + title
+          + " pendingReason=" + pendingReason
+          + " pendingDoneAt=" + pendingDoneTime
+          + " elapsed=" + elapsed + "ms remaining=" + remaining + "ms"
+        )
         continue
       }
 
-      debug("[active:fire:done] " + title + " elapsed=" + elapsed + "ms latestStopTime=" + latestStopTime)
+      debug(
+        "[active:fire:done] "
+        + title
+        + " pendingReason=" + pendingReason
+        + " quietForMs=" + elapsed
+        + " latestStopTime=" + latestStopTime
+      )
       try {
         const dedupEntry = wasDoneAlreadyPushed(
           session.id,
@@ -450,10 +521,13 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       continue
     }
 
-    if (stopAdvanced && stopObservedDuringRuntime && noPostStopParts && hasRuntimeDoneEvidence(prev)) {
+    if (stopNeedsPush && stopObservedDuringRuntime && noPostStopParts && hasRuntimeDoneEvidence(prev)) {
       debug("[active:pending] " + title + " stopTime=" + latestStopTime + " — waiting " + COMPLETE_GRACE_MS + "ms before sending done")
       const entry = getEntry(state, session.id)
-      if (entry) (entry as SessionTrackEntry).pendingDoneAt = latestStopTime
+      if (entry) {
+        ;(entry as SessionTrackEntry).pendingDoneAt = latestStopTime
+        ;(entry as SessionTrackEntry).lastPendingReason = "separate-stop"
+      }
       continue
     }
 
@@ -462,6 +536,7 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       + title
       + " latestTime=" + latestTime
       + " stopAdvanced=" + stopAdvanced
+      + " stopNeedsPush=" + stopNeedsPush
       + " stopObservedDuringRuntime=" + stopObservedDuringRuntime
       + " noPostStopParts=" + noPostStopParts
       + " hasRuntimeDoneEvidence=" + hasRuntimeDoneEvidence(prev)
@@ -471,7 +546,7 @@ async function poll(onPendingWake?: () => void): Promise<void> {
     clearArchiveTracking(state, session.id, latestTime, prev?.lastSeenText ?? "")
   }
 
-  if (!state._schemaVersion || state._schemaVersion < 5) state._schemaVersion = 5
+  if (!state._schemaVersion || state._schemaVersion < 6) state._schemaVersion = 6
   state._daemonStartedAt = DAEMON_STARTED_AT
   if (!DRY_RUN) saveNotifiedState(state)
   HAS_PRIMED_CURRENT_PROCESS = true

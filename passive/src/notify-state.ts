@@ -10,6 +10,9 @@ export interface SessionTrackEntry {
   lastSeenArchiveTime: number
   lastSeenStopTime: number
   lastPushedAt: number
+  lastDonePartTime?: number
+  lastDoneStopTime?: number
+  lastPendingReason?: string
   /** When this session first archived — gates the done card by ARCHIVE_GRACE_MS.
    *  Cleared when the session reactivates, or after the done card is sent.
    */
@@ -26,7 +29,7 @@ export type NotifiedMap = Record<string, SessionTrackEntry> & {
   _daemonStartedAt?: number
 }
 
-const SCHEMA_VERSION = 5
+const SCHEMA_VERSION = 6
 
 function ensureDir(): void {
   if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true })
@@ -48,6 +51,12 @@ function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
   const lastSeenText = typeof entry.lastSeenText === "string" ? entry.lastSeenText : ""
   const lastPushedAt = Number(entry.lastPushedAt ?? 0) || 0
   const lastSeenStopTime = Number((raw as Record<string, unknown>).lastSeenStopTime ?? 0) || 0
+  const lastDonePartTime = Number((raw as Record<string, unknown>).lastDonePartTime ?? 0) || undefined
+  const lastDoneStopTime = Number((raw as Record<string, unknown>).lastDoneStopTime ?? 0) || undefined
+  const lastPendingReason =
+    typeof (raw as Record<string, unknown>).lastPendingReason === "string"
+      ? String((raw as Record<string, unknown>).lastPendingReason)
+      : undefined
   // Only explicit archive markers should drive archive tracking.
   // Older state may have persisted done-only evidence in lastDoneTime, so use that
   // only when lastSeenArchiveTime itself is absent. Never infer archive state from
@@ -62,6 +71,9 @@ function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
     lastSeenArchiveTime,
     lastSeenStopTime,
     lastPushedAt,
+    ...(lastDonePartTime ? { lastDonePartTime } : {}),
+    ...(lastDoneStopTime ? { lastDoneStopTime } : {}),
+    ...(lastPendingReason ? { lastPendingReason } : {}),
     ...(pendingDoneAt ? { pendingDoneAt } : {}),
   }
 }
@@ -143,6 +155,9 @@ function pruneOldEntries(map: NotifiedMap): void {
     }
     const lastActivity = Math.max(
       e.lastPushedAt ?? 0,
+      e.lastDonePartTime ?? 0,
+      e.lastDoneStopTime ?? 0,
+      e.lastPendingReason ? (e.pendingDoneAt ?? 0) : 0,
       e.lastSeenTime ?? 0,
       e.lastSeenStopTime ?? 0,
       e.lastSeenArchiveTime ?? 0,
@@ -167,6 +182,9 @@ export function recordPush(
     lastSeenArchiveTime: archiveTime,
     lastSeenStopTime: Math.max(cur?.lastSeenStopTime ?? 0, stopTime),
     lastPushedAt: Date.now(),
+    lastDonePartTime: partTime,
+    lastDoneStopTime: stopTime || (cur?.lastDoneStopTime ?? 0),
+    lastPendingReason: undefined,
     // pendingDoneAt intentionally cleared here — done card was sent
   }
 }
@@ -185,6 +203,9 @@ export function markSeen(
     lastSeenText: text,
     lastSeenArchiveTime: archiveTime || (cur?.lastSeenArchiveTime ?? 0),
     lastSeenStopTime: Math.max(cur?.lastSeenStopTime ?? 0, stopTime),
+    lastDonePartTime: cur?.lastDonePartTime,
+    lastDoneStopTime: cur?.lastDoneStopTime,
+    lastPendingReason: cur?.lastPendingReason,
     pendingDoneAt: cur?.pendingDoneAt,
     lastPushedAt: cur?.lastPushedAt ?? 0,
   }
@@ -205,6 +226,9 @@ export function clearArchiveTracking(
     // treat old archived state as if it still applies to the current live session.
     lastSeenArchiveTime: 0,
     lastSeenStopTime: cur.lastSeenStopTime ?? 0,
+    lastDonePartTime: cur.lastDonePartTime,
+    lastDoneStopTime: cur.lastDoneStopTime,
+    lastPendingReason: undefined,
     lastPushedAt: cur.lastPushedAt ?? 0,
   }
 }

@@ -564,6 +564,12 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
 - 当前推荐的边界调试真相源：
   - 日日志：`passive/logs/YYYY-MM-DD.log`
   - 持久状态：`passive/logs/notify-state.json`
+- 7 天滚动不要只理解成“删旧文件名”：
+  - `YYYY-MM-DD.log` 这类按天文件，本身已经按内容分日，保留 7 天等于内容窗口 7 天
+  - 但 `passive.err.log` / `passive.out.log` / `passive.log` 这类单文件日志，也必须做内容级裁剪
+  - 本仓现口径应保持为：
+    - 日志文件：删 7 天前整文件
+    - 单文件日志：按行首时间戳裁剪，仅保留最近 7 天内容
 - 新增日志原因码：
   - `active:no-done-evidence`
   - `active:no-done-transition`
@@ -571,6 +577,29 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
   - 候选完成证据是什么时间出现的
   - quiet window 内是否又恢复输出 / 继续 tool
   - 为什么这次没有发完成卡
+- 2026-06-06 22:32 再确认一条硬边界：
+  - 用户看到“这一段已经像结论了”，不等于 passive 应该立刻发 done。
+  - 如果同一 session 后面又继续产生新 `part`，或者最近终止事件只是 `step-finish(reason=tool-calls)`，则该轮仍视为活跃。
+  - 只有满足以下条件才算 active session done：
+    - 最近完成证据是 `step-finish(reason=stop)`
+    - 该 `stop` 之后没有更晚的 `part`
+    - quiet window 已走完
+  - 这条规则是长会话判定基线，不要再用“看到一句总结”替代数据库边界。
+- 状态字段语义也已明确拆分：
+  - `lastSeenTime` / `lastSeenStopTime`
+    - 只是“观察到过”的时间
+  - `lastDonePartTime` / `lastDoneStopTime`
+    - 才是“这轮 done 已经发过”的 dedupe 边界
+  - 否则同一长会话的后续 user turn，容易被旧的 seen 状态误压成“已推送过”
+- 新的长停顿排查字段应优先看：
+  - `pendingReason`
+    - 这次 quiet window 是怎么进入的：`same-poll-stop` / `separate-stop` / `startup-catchup` / `archive`
+  - `quietForMs`
+    - 到日志记录当下，实际已经安静了多久
+  - `resumeAfterStopMs`
+    - 如果 done 被取消，stop 后过了多久又恢复输出
+  - `resumedType` / `resumedReason` / `resumedTool`
+    - 恢复活跃的直接原因是什么
 
 ## 2026-06-06 22:21 status 脚本口径修复
 
