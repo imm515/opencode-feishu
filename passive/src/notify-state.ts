@@ -144,6 +144,22 @@ export function markSeen(
   }
 }
 
+export function clearArchiveTracking(
+  map: NotifiedMap,
+  sessionId: string,
+  partTime?: number,
+  text?: string,
+): void {
+  const cur = map[sessionId]
+  if (!cur) return
+  map[sessionId] = {
+    lastSeenTime: Math.max(cur.lastSeenTime ?? 0, partTime ?? 0),
+    lastSeenText: typeof text === "string" ? text : (cur.lastSeenText ?? ""),
+    lastSeenArchiveTime: 0,
+    lastPushedAt: cur.lastPushedAt ?? Date.now(),
+  }
+}
+
 export function getEntry(map: NotifiedMap, sessionId: string): SessionTrackEntry | null {
   return map[sessionId] ?? null
 }

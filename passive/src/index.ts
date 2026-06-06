@@ -15,6 +15,7 @@ import {
   saveNotifiedState,
   recordPush,
   markSeen,
+  clearArchiveTracking,
   getEntry,
   type SessionTrackEntry,
 } from "./notify-state.js"
@@ -74,7 +75,7 @@ async function poll(): Promise<void> {
       const e = entry as SessionTrackEntry | undefined
       if (e?.pendingDoneAt && activeSet.has(sessionId)) {
         debug("[arch:cancel:reactivated] " + sessionId.slice(0, 18) + " session is active again, cancelling pending done")
-        markSeen(state, sessionId, e.lastSeenTime, e.lastSeenText || "", 0)
+        clearArchiveTracking(state, sessionId, e.lastSeenTime, e.lastSeenText || "")
       }
     }
   }
@@ -194,6 +195,7 @@ async function poll(): Promise<void> {
         const letP = await getLatestPartTime(session.id)
         debug("[active:prime] " + title + " latestPartTime=" + letP)
         markSeen(state, session.id, letP, "", 0)
+        clearArchiveTracking(state, session.id, letP, "")
         continue
       }
 
@@ -203,6 +205,7 @@ async function poll(): Promise<void> {
         debug("[active:skip] " + title + " no assistant text part found")
         const partTime = await getLatestPartTime(session.id)
         markSeen(state, session.id, partTime, "", 0)
+        clearArchiveTracking(state, session.id, partTime, "")
         continue
       }
 
@@ -212,6 +215,7 @@ async function poll(): Promise<void> {
       if (latestTime <= DAEMON_STARTED_AT) {
         debug("[active:skip:old] " + title + " latestTime=" + latestTime + " daemonStart=" + DAEMON_STARTED_AT)
         markSeen(state, session.id, latestTime, "", 0)
+        clearArchiveTracking(state, session.id, latestTime, "")
         continue
       }
 
@@ -236,12 +240,15 @@ async function poll(): Promise<void> {
         const replyTime = joined.latestTime
         debug("[active:assemble] " + title + " chunks=" + joined.chunkCount + " len=" + replyText.length + " replyTime=" + replyTime)
         markSeen(state, session.id, replyTime, replyText, 0)
+        clearArchiveTracking(state, session.id, replyTime, replyText)
         debug("[active:skip:reply_push_disabled] " + title)
       } else if (hasNew) {
         debug("[active:skip:empty] " + title + " latestTime=" + latestTime + " text is empty")
         markSeen(state, session.id, latestTime, "", 0)
+        clearArchiveTracking(state, session.id, latestTime, "")
       } else {
         markSeen(state, session.id, latestTime, "", 0)
+        clearArchiveTracking(state, session.id, latestTime, "")
       }
     }
   }
