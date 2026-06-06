@@ -53,6 +53,65 @@ function shortTitle(title: string | null | undefined, id: string): string {
   return title.length > 40 ? title.slice(0, 40) + "..." : title
 }
 
+function summarizeTextEdge(text: string, maxLen = 72): string {
+  const normalized = text.replace(/\s+/g, " ").trim()
+  if (!normalized) return ""
+  return normalized.length > maxLen ? normalized.slice(0, maxLen) + "..." : normalized
+}
+
+function getProvisionalDoneReason(text: string): string | null {
+  const trimmed = text.trim()
+  if (!trimmed) return "empty"
+
+  const normalized = trimmed.replace(/\s+/g, " ")
+  const lower = normalized.toLowerCase()
+  const lastChar = normalized.slice(-1)
+  const provisionalPrefixes = [
+    "等等",
+    "稍等",
+    "我先",
+    "我现在",
+    "让我先",
+    "我先检查",
+    "我先确认",
+    "let me ",
+    "i'll ",
+    "i will ",
+  ]
+  const provisionalPhrases = [
+    "让我先",
+    "我先检查",
+    "我先确认",
+    "先看一下",
+    "先查一下",
+    "继续处理",
+    "继续看看",
+  ]
+
+  if (provisionalPrefixes.some((prefix) => lower.startsWith(prefix.toLowerCase()))) {
+    return "provisional-prefix"
+  }
+  if (provisionalPhrases.some((phrase) => normalized.includes(phrase))) {
+    return "provisional-phrase"
+  }
+  if (/[：:，,、(\[{]$/.test(lastChar)) {
+    return "open-ending"
+  }
+  if (/[.]{3}$/.test(normalized) || /[。．｡…]{1,2}$/.test(normalized)) {
+    return "trailing-ellipsis"
+  }
+  if (/[\p{L}\p{N}]$/u.test(lastChar) && normalized.length < 24) {
+    return "short-bare-tail"
+  }
+  return null
+}
+
+function pickDoneText(latestText: string, seenText: string | null | undefined): string {
+  const seen = (seenText ?? "").trim()
+  if (seen) return seen
+  return latestText.trim()
+}
+
 function hashText(text: string): string {
   return createHash("sha1").update(text).digest("hex").slice(0, 12)
 }
@@ -323,7 +382,18 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       debug("[arch:fire:done] " + title + " elapsed=" + elapsed + "ms latestPartTime=" + latestPartTime + " latestStopTime=" + latestStopTime)
       try {
         const latest = await getLatestAssistantPart(session.id)
-        const latestText = latest?.text ?? ""
+        const latestText = pickDoneText(latest?.text ?? "", prev?.lastSeenText)
+        const provisionalReason = getProvisionalDoneReason(latestText)
+        if (provisionalReason) {
+          debug(
+            "[arch:skip:provisional-text] "
+            + title
+            + " reason=" + provisionalReason
+            + " textEdge=" + summarizeTextEdge(latestText)
+          )
+          clearArchiveTracking(state, session.id, latest?.time_created ?? entry?.lastSeenTime, latestText)
+          continue
+        }
         const dedupEntry = wasDoneAlreadyPushed(
           session.id,
           latest?.time_created ?? archiveTime,
@@ -489,6 +559,19 @@ async function poll(onPendingWake?: () => void): Promise<void> {
         + " triggerObservedDelayMs=" + (lastTriggerMeta ? Math.max(0, lastTriggerMeta.observedAt - latestStopTime) : 0)
       )
       try {
+        const doneText = pickDoneText(latest.text, prev?.lastSeenText)
+        const provisionalReason = getProvisionalDoneReason(doneText)
+        if (provisionalReason) {
+          debug(
+            "[active:skip:provisional-text] "
+            + title
+            + " reason=" + provisionalReason
+            + " pendingReason=" + pendingReason
+            + " textEdge=" + summarizeTextEdge(doneText)
+          )
+          clearArchiveTracking(state, session.id, latest.time_created, doneText)
+          continue
+        }
         const dedupEntry = wasDoneAlreadyPushed(
           session.id,
           latest.time_created,
@@ -513,12 +596,12 @@ async function poll(onPendingWake?: () => void): Promise<void> {
             sessionId: session.id,
             sessionTitle: session.title,
             kind: "done",
-            text: latest.text || null,
+            text: doneText || null,
             archiveTime: null,
             textTime: latest.time_created ?? null,
           })
         }
-        recordPush(state, session.id, latest.text, latest.time_created, 0, latestStopTime)
+        recordPush(state, session.id, doneText, latest.time_created, 0, latestStopTime)
         pushes++
         detailLines.push("done: " + title)
       } catch (err) {

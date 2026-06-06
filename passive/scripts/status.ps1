@@ -8,6 +8,31 @@ $stateFile = Join-Path $logDir "notify-state.json"
 $outLog = Join-Path $logDir "passive.out.log"
 $errLog = Join-Path $logDir "passive.err.log"
 
+function Read-JsonWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [int]$Attempts = 4,
+        [int]$DelayMs = 120
+    )
+
+    $lastError = $null
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+            return ($raw | ConvertFrom-Json)
+        } catch {
+            $lastError = $_
+            if ($i -lt $Attempts) {
+                Start-Sleep -Milliseconds $DelayMs
+            }
+        }
+    }
+
+    if ($lastError) { throw $lastError }
+    throw "Failed to read JSON: $Path"
+}
+
 Write-Host "=== opencode-feishu passive status ==="
 Write-Host "pidfile: $pidFile"
 Write-Host "lockfile: $lockFile"
@@ -53,7 +78,7 @@ if (Test-Path $stateFile) {
     Write-Host "  size    : $($fi.Length) B"
     Write-Host "  mtime   : $($fi.LastWriteTime)"
     try {
-        $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+        $state = Read-JsonWithRetry -Path $stateFile
         $schemaVersion = $state._schemaVersion
         $sessions = @()
         foreach ($prop in $state.PSObject.Properties) {
@@ -83,7 +108,7 @@ if (Test-Path $stateFile) {
             }
         }
     } catch {
-        Write-Host "  (failed to parse: $_)"
+        Write-Host "  (failed to parse after retry: $($_.Exception.Message))"
     }
 } else {
     Write-Host "  (not found — daemon never started or first run)"
