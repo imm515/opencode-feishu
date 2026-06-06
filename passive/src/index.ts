@@ -122,6 +122,43 @@ async function poll(): Promise<void> {
     return
   }
 
+  if (isStartup) {
+    // Startup priming is a snapshot step, not normal transition processing.
+    // Rebuild active-session tracking from the live DB view so old archive markers
+    // cannot leak forward into the current daemon window.
+    for (const session of activeSessions) {
+      const latestPartTime = await getLatestPartTime(session.id)
+      const prev = getEntry(state, session.id)
+      state[session.id] = {
+        lastSeenTime: Math.max(prev?.lastSeenTime ?? 0, latestPartTime),
+        lastSeenText: "",
+        lastSeenArchiveTime: 0,
+        lastPushedAt: prev?.lastPushedAt ?? 0,
+      }
+    }
+
+    // Archived sessions seen during startup are only primed as already-known archive
+    // snapshots. They must not become pending done transitions in this daemon window.
+    for (const session of archivedSessions) {
+      const latestPartTime = await getLatestPartTime(session.id)
+      const prev = getEntry(state, session.id)
+      state[session.id] = {
+        lastSeenTime: Math.max(prev?.lastSeenTime ?? 0, latestPartTime),
+        lastSeenText: "",
+        lastSeenArchiveTime: session.time_archived ?? 0,
+        lastPushedAt: prev?.lastPushedAt ?? 0,
+      }
+    }
+
+    if (!state._schemaVersion || state._schemaVersion < 4) state._schemaVersion = 4
+    state._daemonStartedAt = DAEMON_STARTED_AT
+    if (!DRY_RUN) saveNotifiedState(state)
+    HAS_PRIMED_CURRENT_PROCESS = true
+    logPoll(sessions.length, 0, undefined, 0)
+    info("[cycle] pushes=0 sessions=" + sessions.length + " status=" + stateStatus)
+    return
+  }
+
   let pushes = 0
   const detailLines: string[] = []
 

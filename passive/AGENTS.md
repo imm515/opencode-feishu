@@ -177,6 +177,32 @@ passive/src/
   - 新窗口长时间在线后仍无新的历史 done 批量重放
   - `notify-state.json` 中 active session 不再残留 `lastSeenArchiveTime > 0`
 
+## 2026-06-06 20:34 运行态再更新：startup priming 污染已被受控重启验证打掉
+
+- 最新受控重启窗口：
+  - PID：`7292`
+  - 启动时间：`2026-06-06 20:34:14 +08:00`
+- 本轮新增修复点：
+  - `passive/src/index.ts`
+  - startup 首轮不再沿用普通 transition poll
+  - 改为单独 snapshot priming：
+    - active sessions -> `lastSeenArchiveTime = 0`
+    - archived sessions -> 仅记录真实 archive 快照
+- 验证结果：
+  - 启动日志：`poll: sessions=127 transitions=0`
+  - `notify-state.json` 抽样中，原先污染的 active session 已恢复为：
+    - `lastSeenArchiveTime: 0`
+  - 汇总计数：`archiveTrackedCount = 0`
+- 这意味着：
+  - “startup 会把 active session 批量写成 archived” 这一主因，在当前新窗口已被修掉
+  - 当前可以把结论升级为：
+    - `当前未多开`
+    - `startup 首轮未重放历史完成`
+    - `active-session archive 污染已在受控重启中验证修复`
+- 仍保留最后一道审计谨慎项：
+  - 还需要至少一次真实 archive/完成场景继续观察
+  - 再决定是否把结论升级为“历史 done 重放已长期验证通过”
+
 ## 目录结构
 
 ```
