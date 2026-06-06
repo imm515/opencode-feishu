@@ -70,6 +70,28 @@ passive/src/
 
 完成卡当前以 `session.time_archived` 作为唯一可信完成信号。不要再把 active session 里的 `step-finish(stop)` 当作完成推送条件，否则会出现“实际上还没结束，但先弹完成卡”的误报。
 
+## 2026-06-06 运行态校验补充
+
+- `passive/src/index.ts` 与 `passive/dist/index.js` 当前口径都是：active session 只 `markSeen(...)`，**不发送中间 reply 卡**。
+- 如果日志里仍出现 `kind=reply` / `💬 OpenCode 新回复`，先不要误判为源码回退；本机已实证过一种更常见情况：
+  - 旧 daemon 进程在 `build` / `git pull` 之前启动；
+  - 后来工作树和 `dist/` 已更新成“禁 reply”版本；
+  - 但旧进程没重启，仍按旧内存代码继续推 `reply`。
+- 本机这次实证：
+  - 旧进程：`PID 22596`，启动于 `2026-06-06 09:34:02`
+  - 新代码构建时间：`passive/dist/index.js` `LastWriteTime = 2026-06-06 16:11:29`
+  - 旧进程直到 `2026-06-06 16:24:25` 仍在写 `kind=reply`
+  - `2026-06-06 16:52:50` 重启为 `PID 23736` 后，新日志不再出现新的 `reply`
+- 因此排查顺序必须是：
+  1. 看运行进程 PID / 启动时间
+  2. 看 `dist/index.js` 的 `LastWriteTime`
+  3. 先 `npm run build`
+  4. 再 `pwsh -File passive/scripts/start.ps1 -Action restart`
+  5. 再用 `lark-cli` 真实触发一轮并看 **重启时间之后** 的日志
+- 验证金标准：
+  - 进程命令行应为：`node ...\passive\dist\index.js`
+  - `2026-06-06.log` 在新 `starting {"pid":...}` 之后，只允许出现 `done`，不应再出现新的 `kind=reply`
+
 ## 目录结构
 
 ```
