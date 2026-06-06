@@ -494,3 +494,27 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
   - `notify-state.json` 已成功规范化回写
   - 截至采样点，新窗口后未见新的 `kind=reply`
   - 但这仍只算“当前窗口暂时干净”，后续还要用真实用户事件再次验证 done-only 运行态
+
+## 2026-06-06 22:29 新补充：done-only 还必须防重复 done
+
+- passive 当前真实状态文件路径是：
+  - `D:\Program Files Dev\opencode-feishu\passive\logs\notify-state.json`
+  - 不要误查 `~/.config/opencode/notify-state.json`
+- 新抓到的当前运行态问题不是历史噪声：
+  - 在同一 live PID `23980` 窗口里
+  - 同一 session `ses_16382a68...`
+  - 出现了连续 3 次 `kind=done`
+  - 日志时间：`21:22:53`、`21:24:17`、`21:39:03` UTC+8
+- 这说明：
+  - done-only 不只是“去掉中间 reply”
+  - 还必须防“同一完成证据窗口重复补发 done”
+- 当前修复方向已落在 `src/index.ts`：
+  - 发 `done` 之前，重新加载磁盘 `notify-state.json`
+  - 若 fresh state 对同一 session 已满足：
+    - `lastPushedAt > 0`
+    - `lastSeenTime >= 当前 event time`
+    - `lastSeenStopTime >= 当前 stop time`
+  - 则跳过再次发卡，只同步 state
+- 注意边界：
+  - 这个闸门是拦同一完成窗口的重复发卡
+  - 不是禁止同一 session 后续新 user turn 再发新的完成卡

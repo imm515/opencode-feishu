@@ -65,6 +65,24 @@ function getPendingDoneTime(entry: SessionTrackEntry | null | undefined): number
   return entry?.pendingDoneAt ?? 0
 }
 
+function wasDoneAlreadyPushed(
+  sessionId: string,
+  eventTime: number,
+  stopTime: number,
+): SessionTrackEntry | null {
+  const freshState = loadNotifiedState()
+  const freshEntry = getEntry(freshState, sessionId)
+  if (!freshEntry) return null
+
+  const pushedAt = freshEntry.lastPushedAt ?? 0
+  const seenTime = freshEntry.lastSeenTime ?? 0
+  const seenStopTime = freshEntry.lastSeenStopTime ?? 0
+  if (pushedAt > 0 && seenTime >= eventTime && seenStopTime >= stopTime) {
+    return freshEntry
+  }
+  return null
+}
+
 function schedulePendingWake(
   state: ReturnType<typeof loadNotifiedState>,
   onWake?: () => void,
@@ -265,6 +283,23 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       try {
         const latest = await getLatestAssistantPart(session.id)
         const latestText = latest?.text ?? ""
+        const dedupEntry = wasDoneAlreadyPushed(
+          session.id,
+          latest?.time_created ?? archiveTime,
+          latestStopTime,
+        )
+        if (dedupEntry) {
+          debug("[arch:skip:already-pushed] " + title + " latestTime=" + (latest?.time_created ?? archiveTime) + " stopTime=" + latestStopTime)
+          recordPush(
+            state,
+            session.id,
+            dedupEntry.lastSeenText || latestText,
+            Math.max(dedupEntry.lastSeenTime ?? 0, latest?.time_created ?? archiveTime),
+            Math.max(dedupEntry.lastSeenArchiveTime ?? 0, archiveTime),
+            Math.max(dedupEntry.lastSeenStopTime ?? 0, latestStopTime),
+          )
+          continue
+        }
         if (!DRY_RUN) {
           await sendNotify({
             appId: config.appId,
@@ -365,6 +400,23 @@ async function poll(onPendingWake?: () => void): Promise<void> {
 
       debug("[active:fire:done] " + title + " elapsed=" + elapsed + "ms latestStopTime=" + latestStopTime)
       try {
+        const dedupEntry = wasDoneAlreadyPushed(
+          session.id,
+          latest.time_created,
+          latestStopTime,
+        )
+        if (dedupEntry) {
+          debug("[active:skip:already-pushed] " + title + " latestTime=" + latest.time_created + " stopTime=" + latestStopTime)
+          recordPush(
+            state,
+            session.id,
+            dedupEntry.lastSeenText || latest.text,
+            Math.max(dedupEntry.lastSeenTime ?? 0, latest.time_created),
+            Math.max(dedupEntry.lastSeenArchiveTime ?? 0, 0),
+            Math.max(dedupEntry.lastSeenStopTime ?? 0, latestStopTime),
+          )
+          continue
+        }
         if (!DRY_RUN) {
           await sendNotify({
             appId: config.appId,
