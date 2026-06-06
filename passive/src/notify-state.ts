@@ -8,6 +8,10 @@ export interface SessionTrackEntry {
   lastSeenText: string
   lastSeenArchiveTime: number
   lastPushedAt: number
+  /** When this session first archived — gates the done card by ARCHIVE_GRACE_MS.
+   *  Cleared when the session reactivates, or after the done card is sent.
+   */
+  pendingDoneAt?: number
 }
 
 interface LegacySessionTrackEntry extends SessionTrackEntry {
@@ -45,11 +49,13 @@ function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
     Number(entry.lastDoneTime ?? 0) || 0,
   )
   const lastPushedAt = Number(entry.lastPushedAt ?? 0) || 0
+  const pendingDoneAt = Number((raw as any).pendingDoneAt ?? 0) || undefined
   return {
     lastSeenTime,
     lastSeenText,
     lastSeenArchiveTime,
     lastPushedAt,
+    ...(pendingDoneAt ? { pendingDoneAt } : {}),
   }
 }
 
@@ -115,6 +121,7 @@ export function recordPush(
     lastSeenText: text,
     lastSeenArchiveTime: archiveTime,
     lastPushedAt: Date.now(),
+    // pendingDoneAt intentionally cleared here — done card was sent
   }
 }
 
@@ -130,6 +137,7 @@ export function markSeen(
     lastSeenTime: partTime > (cur?.lastSeenTime ?? 0) ? partTime : (cur?.lastSeenTime ?? 0),
     lastSeenText: text,
     lastSeenArchiveTime: archiveTime || (cur?.lastSeenArchiveTime ?? 0),
+    pendingDoneAt: cur?.pendingDoneAt,
     lastPushedAt: cur?.lastPushedAt ?? Date.now(),
   }
 }

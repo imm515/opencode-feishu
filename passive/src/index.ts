@@ -1,4 +1,4 @@
-import { loadConfig, DB_PATH, CHAT_ID, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS } from "./config.js"
+﻿import { loadConfig, DB_PATH, CHAT_ID, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS } from "./config.js"
 import {
   getActiveSessions,
   getRecentlyArchivedSessions,
@@ -15,6 +15,7 @@ import {
   recordPush,
   markSeen,
   getEntry,
+  type SessionTrackEntry,
 } from "./notify-state.js"
 import { info, error, debug, logPoll, setVerbose } from "./logger.js"
 import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs"
@@ -28,7 +29,7 @@ const ONE_SHOT = process.argv.includes("--once")
 const VERBOSE = process.argv.includes("--verbose") || process.argv.includes("-v")
 const RESET = process.argv.includes("--reset-state")
 
-// Always use THIS process start time for the 'session predates daemon' check.
+// Always use THIS process start time for the '"'"'session predates daemon'"'"' check.
 const DAEMON_STARTED_AT = Date.now()
 
 function readVersion(): string {
@@ -56,6 +57,24 @@ async function poll(): Promise<void> {
 
   const activeSessions = await getActiveSessions()
   const archivedSessions = await getRecentlyArchivedSessions(ARCHIVE_GRACE_MS)
+
+  // Build a Set of currently active/archived session IDs for cancel-check below.
+  const activeSet = new Set(activeSessions.map((s) => s.id))
+
+  // --- STEP 1: Cancel pending done if session has reactivated ---
+  // If an entry has pendingDoneAt but the session is now active (not archived),
+  // the user sent a new message — cancel the pending done.
+  if (!isStartup) {
+    for (const [sessionId, entry] of Object.entries(state)) {
+      if (sessionId.startsWith("_")) continue
+      const e = entry as SessionTrackEntry | undefined
+      if (e?.pendingDoneAt && activeSet.has(sessionId)) {
+        debug("[arch:cancel:reactivated] " + sessionId.slice(0, 18) + " session is active again, cancelling pending done")
+        markSeen(state, sessionId, e.lastSeenTime, e.lastSeenText || "", 0)
+      }
+    }
+  }
+
   const sessions = [...activeSessions, ...archivedSessions]
 
   if (sessions.length === 0) {
@@ -82,41 +101,62 @@ async function poll(): Promise<void> {
           debug("[arch:prime] " + title + " archiveTime=" + archiveTime + " latestPartTime=" + latestPartTime)
           markSeen(state, session.id, latestPartTime, "", archiveTime)
         } else {
-          // === DEDUP: re-read state to check if another instance already pushed archive ===
+          // === DEDUP: re-read state to check if another instance already handled this archive ===
           const freshState = loadNotifiedState()
           const freshEntry = getEntry(freshState, session.id)
           if (freshEntry && freshEntry.lastSeenArchiveTime >= archiveTime) {
-            debug("[arch:skip:dedup] " + title + " another instance already pushed archiveTime=" + archiveTime)
+            debug("[arch:skip:dedup] " + title + " another instance already handled archiveTime=" + archiveTime)
             markSeen(state, session.id, freshEntry.lastSeenTime, "", archiveTime)
             continue
           }
 
-          try {
-            const latest = await getLatestAssistantPart(session.id)
-            const latestText = latest?.text ?? ""
-            debug("[arch:push] " + title + " archiveTime=" + archiveTime + " textTime=" + (latest?.time_created ?? null) + " textLen=" + latestText.length)
-            if (!DRY_RUN) {
-              await sendNotify({
-                appId: config.appId,
-                appSecret: config.appSecret,
-                sessionId: session.id,
-                sessionTitle: session.title,
-                kind: "done",
-                text: latestText || null,
-                archiveTime,
-                textTime: latest?.time_created ?? null,
-              })
-            }
-            const partTimeForState = latest?.time_created ?? archiveTime
-            recordPush(state, session.id, latestText, partTimeForState, archiveTime)
-            pushes++
-            detailLines.push("done: " + title)
-          } catch (err) {
-            error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
-          }
+          // Record pendingDoneAt — done card is deferred until ARCHIVE_GRACE_MS expires.
+          // If the session reactivates before then, the cancel-check above clears pendingDoneAt.
+          debug("[arch:pending] " + title + " archiveTime=" + archiveTime + " — waiting " + ARCHIVE_GRACE_MS + "ms before sending done")
+          const prevTimeVal = prev?.lastSeenTime ?? 0
+          const prevTextVal = prev?.lastSeenText ?? ""
+          markSeen(state, session.id, prevTimeVal, prevTextVal, archiveTime)
+          // Set pendingDoneAt on the entry just written
+          const entry = getEntry(state, session.id)
+          if (entry) (entry as SessionTrackEntry).pendingDoneAt = archiveTime
         }
       } else {
-        debug("[arch:skip] " + title + " archiveTime=" + archiveTime + " <= prevArchiveTime=" + prevArchiveTime)
+        // Session is still archived — check if the pending done timer has expired.
+        const entry = prev as SessionTrackEntry | null
+        if (entry?.pendingDoneAt) {
+          const elapsed = Date.now() - entry.pendingDoneAt
+          if (elapsed >= ARCHIVE_GRACE_MS) {
+            // Timer expired — send the done card.
+            debug("[arch:fire:done] " + title + " elapsed=" + elapsed + "ms >= " + ARCHIVE_GRACE_MS + "ms — sending done")
+            try {
+              const latest = await getLatestAssistantPart(session.id)
+              const latestText = latest?.text ?? ""
+              debug("[arch:done] " + title + " textLen=" + latestText.length)
+              if (!DRY_RUN) {
+                await sendNotify({
+                  appId: config.appId,
+                  appSecret: config.appSecret,
+                  sessionId: session.id,
+                  sessionTitle: session.title,
+                  kind: "done",
+                  text: latestText || null,
+                  archiveTime,
+                  textTime: latest?.time_created ?? null,
+                })
+              }
+              const partTimeForState = latest?.time_created ?? archiveTime
+              recordPush(state, session.id, latestText, partTimeForState, archiveTime)
+              pushes++
+              detailLines.push("done: " + title)
+            } catch (err) {
+              error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
+            }
+          } else {
+            debug("[arch:wait] " + title + " pendingDoneAt=" + entry.pendingDoneAt + " elapsed=" + elapsed + "ms — still waiting")
+          }
+        } else {
+          debug("[arch:skip] " + title + " archiveTime=" + archiveTime + " <= prevArchiveTime=" + prevArchiveTime + " no pendingDoneAt")
+        }
       }
     } else {
       // --- active session ---
@@ -149,8 +189,6 @@ async function poll(): Promise<void> {
       const ctxLatest = await getLatestPartTime(session.id)
       debug("[active:check] " + title + " latestTime=" + latestTime + " hasNew=" + hasNew + " latestPart=" + ctxLatest)
 
-      let latestText = ""
-
       if (hasNew && latest.text.trim()) {
         // === DEDUP: re-read state to check if another instance already pushed ===
         const freshState = loadNotifiedState()
@@ -161,26 +199,18 @@ async function poll(): Promise<void> {
           continue
         }
 
-        // === ASSEMBLE FULL STREAMED REPLY ===
-        // AI streams text in multiple part chunks. We must concatenate all
-        // assistant text parts since the last push to capture the full reply
-        // (not just the last streaming chunk).
+        // Passive mode tracks new text for done detection only.
+        // No intermediate reply card is pushed.
         const joined = await getAssistantTextSince(session.id, prevTime)
         const replyText = joined.text.trim() || latest.text.trim()
         const replyTime = joined.latestTime
         debug("[active:assemble] " + title + " chunks=" + joined.chunkCount + " len=" + replyText.length + " replyTime=" + replyTime)
-
-        // Passive mode now tracks new assistant text only for done detection/state.
-        // No intermediate reply card is pushed.
-        latestText = replyText
         markSeen(state, session.id, replyTime, replyText, 0)
-        debug("[active:skip:reply_push_disabled] " + title + " latestPart=" + ctxLatest)
+        debug("[active:skip:reply_push_disabled] " + title)
       } else if (hasNew) {
         debug("[active:skip:empty] " + title + " latestTime=" + latestTime + " text is empty")
         markSeen(state, session.id, latestTime, "", 0)
-      }
-
-      if (!hasNew) {
+      } else {
         markSeen(state, session.id, latestTime, "", 0)
       }
     }

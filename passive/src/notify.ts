@@ -1,9 +1,8 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
+﻿import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs"
 import { info, error } from "./logger.js"
 import { sendInteractiveCard } from "./sender.js"
 import { buildCardFromDSL, type CardArgs, type CardTemplate } from "./card-dsl.js"
 import { CHAT_ID } from "./config.js"
-import { truncateMarkdown } from "./markdown.js"
 import { LOG_DIR } from "./paths.js"
 
 const THREAD_TEMPLATES: { template: CardTemplate }[] = [
@@ -78,7 +77,7 @@ export function threadTemplate(sessionId: string): CardTemplate {
   return t
 }
 
-export type PushKind = "reply" | "done"
+export type PushKind = "done"  // Only done cards — passive bot sends no intermediate cards.
 
 export interface NotifyParams {
   appId: string
@@ -113,31 +112,16 @@ export async function sendNotify(params: NotifyParams): Promise<void> {
 
   const t = shortTitle(sessionTitle, sessionId)
   const sections: CardArgs["sections"] = []
-  let title = ""
+  const title = `✅ OpenCode 任务完成`
   const template = threadTemplate(sessionId)
 
-  if (kind === "done") {
-    title = `✅ OpenCode 任务完成`
-    sections.push({ type: "markdown", content: `**会话**: ${t}` })
-    sections.push({
-      type: "note",
-      content: `结束时间: ${fmtTime(archiveTime)}  |  session: ${sessionId.slice(0, 12)}…`,
-    })
-    sections.push({ type: "markdown", content: "<at id=all></at>" })
-  } else {
-    title = `💬 OpenCode 新回复`
-    sections.push({ type: "markdown", content: `**会话**: ${t}` })
-    if (text && text.trim()) {
-      sections.push({ type: "divider" })
-      sections.push({ type: "markdown", content: truncateMarkdown(text) })
-    } else {
-      sections.push({ type: "markdown", content: `\nAI 已产生新内容（无文本）。` })
-    }
-    sections.push({
-      type: "note",
-      content: `回复时间: ${fmtTime(textTime)}  |  session: ${sessionId.slice(0, 12)}…`,
-    })
-  }
+  sections.push({ type: "markdown", content: `**会话**: ${t}` })
+  sections.push({
+    type: "note",
+    content: `结束时间: ${fmtTime(archiveTime)}  |  session: ${sessionId.slice(0, 12)}…`,
+  })
+  // Summon all members so anyone in the chat sees the notification.
+  sections.push({ type: "markdown", content: "<at id=all></at>" })
 
   info(`[push] kind=${kind} session=${sessionId.slice(0, 12)} text_len=${text?.length ?? 0}`, {
     title,
