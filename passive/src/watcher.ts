@@ -27,6 +27,7 @@ export class FileWatcher {
   private fallbackMs: number
   private lastSignature: string
   private pendingTrigger: { source: "dir" | "file"; event: string; filename: string | null } | null = null
+  private startedAt = 0
 
   constructor(
     dbPath: string,
@@ -60,6 +61,10 @@ export class FileWatcher {
     return `${db.mtimeMs}:${db.size}|${wal.mtimeMs}:${wal.size}`
   }
 
+  resetBaseline(): void {
+    this.lastSignature = this.readSignature()
+  }
+
   private relevantFile(name: string | null): boolean {
     if (!name) return true
     return name === this.dbPrefix || name === this.dbPrefix + "-wal" || name === this.dbPrefix + "-shm"
@@ -89,6 +94,10 @@ export class FileWatcher {
       const signature = this.readSignature()
       const changed = signature !== this.lastSignature
       if (changed) {
+        if (source !== "fallback" && this.startedAt > 0 && Date.now() - this.startedAt < this.debounceMs) {
+          this.lastSignature = signature
+          return
+        }
         this.lastSignature = signature
       }
       this.onChange({
@@ -121,6 +130,8 @@ export class FileWatcher {
   }
 
   start(): void {
+    this.startedAt = Date.now()
+    this.resetBaseline()
     this.ensureFileWatchers()
     this.dirWatcher = watch(this.dbDir, (event, filename) => {
       this.ensureFileWatchers()

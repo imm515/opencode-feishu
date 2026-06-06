@@ -794,6 +794,10 @@ async function main(): Promise<void> {
   let pollInFlight = false
   let pollQueued = false
   const triggerPoll = async () => {
+    if (HAS_PRIMED_CURRENT_PROCESS && !lastTriggerMeta && Date.now() - DAEMON_STARTED_AT < WATCH_DEBOUNCE_MS) {
+      debug("[poll:skip:start-settle] ageMs=" + (Date.now() - DAEMON_STARTED_AT))
+      return
+    }
     if (pollInFlight) {
       pollQueued = true
       return
@@ -835,7 +839,6 @@ async function main(): Promise<void> {
     WATCH_DEBOUNCE_MS,
     FALLBACK_CHECK_MS,
   )
-  watcher.start()
 
   const shutdown = (sig: string) => {
     info("Received " + sig + ", shutting down")
@@ -858,7 +861,7 @@ async function main(): Promise<void> {
   process.on("uncaughtException", (err) => error("uncaught", { e: err.message, s: err.stack }))
   process.on("unhandledRejection", (r) => error("unhandled", { r: String(r) }))
 
-  await poll(() => { void triggerPoll() })
+  await triggerPoll()
   if (ONE_SHOT) {
     info("--once, exiting")
     watcher.stop()
@@ -870,6 +873,7 @@ async function main(): Promise<void> {
     }
     process.exit(0)
   }
+  watcher.start()
   info("Daemon running, watching " + DB_PATH + " (debounce=" + WATCH_DEBOUNCE_MS + "ms, fallback=" + FALLBACK_CHECK_MS + "ms)")
 }
 
