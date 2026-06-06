@@ -1,4 +1,4 @@
-﻿import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, rmSync } from "node:fs"
 import { LOG_DIR, STATE_FILE } from "./paths.js"
 
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
@@ -95,6 +95,8 @@ export function saveNotifiedState(map: NotifiedMap): void {
   const tmp = STATE_FILE + ".tmp"
   try {
     writeFileSync(tmp, JSON.stringify(normalized, null, 2), "utf-8")
+    // Windows renameSync cannot replace an existing file atomically like POSIX.
+    rmSync(STATE_FILE, { force: true })
     renameSync(tmp, STATE_FILE)
   } catch { /* skip */ }
 }
