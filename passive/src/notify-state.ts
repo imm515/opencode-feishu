@@ -10,6 +10,11 @@ export interface SessionTrackEntry {
   lastPushedAt: number
 }
 
+interface LegacySessionTrackEntry extends SessionTrackEntry {
+  lastDoneTime?: number
+  pendingDoneTime?: number
+}
+
 export type NotifiedMap = Record<string, SessionTrackEntry> & {
   _schemaVersion?: number
   _daemonStartedAt?: number
@@ -30,12 +35,40 @@ function isLegacy(raw: unknown): boolean {
   return false
 }
 
+function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
+  if (!raw || typeof raw !== "object") return null
+  const entry = raw as LegacySessionTrackEntry
+  const lastSeenTime = Number(entry.lastSeenTime ?? 0) || 0
+  const lastSeenText = typeof entry.lastSeenText === "string" ? entry.lastSeenText : ""
+  const lastSeenArchiveTime = Math.max(
+    Number(entry.lastSeenArchiveTime ?? 0) || 0,
+    Number(entry.lastDoneTime ?? 0) || 0,
+  )
+  const lastPushedAt = Number(entry.lastPushedAt ?? 0) || 0
+  return {
+    lastSeenTime,
+    lastSeenText,
+    lastSeenArchiveTime,
+    lastPushedAt,
+  }
+}
+
 export function loadNotifiedState(): NotifiedMap {
   if (!existsSync(STATE_FILE)) return {}
   try {
     const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as NotifiedMap
     if (isLegacy(raw)) return {}
-    if (raw && typeof raw === "object") return raw
+    if (raw && typeof raw === "object") {
+      const normalized: NotifiedMap = {}
+      if (typeof raw._schemaVersion === "number") normalized._schemaVersion = raw._schemaVersion
+      if (typeof raw._daemonStartedAt === "number") normalized._daemonStartedAt = raw._daemonStartedAt
+      for (const [key, value] of Object.entries(raw)) {
+        if (key.startsWith("_")) continue
+        const entry = sanitizeEntry(value)
+        if (entry) normalized[key] = entry
+      }
+      return normalized
+    }
     return {}
   } catch {
     return {}
@@ -45,10 +78,17 @@ export function loadNotifiedState(): NotifiedMap {
 export function saveNotifiedState(map: NotifiedMap): void {
   ensureDir()
   pruneOldEntries(map)
-  map._schemaVersion = SCHEMA_VERSION
+  const normalized: NotifiedMap = {}
+  if (typeof map._daemonStartedAt === "number") normalized._daemonStartedAt = map._daemonStartedAt
+  for (const [key, value] of Object.entries(map)) {
+    if (key.startsWith("_")) continue
+    const entry = sanitizeEntry(value)
+    if (entry) normalized[key] = entry
+  }
+  normalized._schemaVersion = SCHEMA_VERSION
   const tmp = STATE_FILE + ".tmp"
   try {
-    writeFileSync(tmp, JSON.stringify(map, null, 2), "utf-8")
+    writeFileSync(tmp, JSON.stringify(normalized, null, 2), "utf-8")
     renameSync(tmp, STATE_FILE)
   } catch { /* skip */ }
 }

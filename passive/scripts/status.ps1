@@ -80,9 +80,20 @@ if (Test-Path $outLog) {
 }
 
 if ((Test-Path $errLog) -and (Get-Item $errLog).Length -gt 0) {
-    Write-Host ""
-    Write-Host "WARN: passive.err.log has content:"
-    Get-Content $errLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    $errInfo = Get-Item $errLog
+    $showErr = $true
+    if ($proc -and $errInfo.LastWriteTime -lt $proc.StartTime) {
+        $showErr = $false
+        Write-Host ""
+        Write-Host "INFO: passive.err.log only has historical content (older than current daemon start)"
+        Write-Host "  path  : $errLog"
+        Write-Host "  mtime : $($errInfo.LastWriteTime)"
+    }
+    if ($showErr) {
+        Write-Host ""
+        Write-Host "WARN: passive.err.log has content:"
+        Get-Content $errLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+    }
 }
 
 Write-Host ""
