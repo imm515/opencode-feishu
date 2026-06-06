@@ -19,8 +19,16 @@ $LogDir       = Join-Path $PassiveRoot 'logs'
 $OutLog       = Join-Path $LogDir 'autostart.out.log'
 $ErrLog       = Join-Path $LogDir 'autostart.err.log'
 
-# Feishu webhook for push notification
-$WebhookUrl = 'https://open.feishu.cn/open-apis/bot/v2/hook/0bfd8b32-ca7f-4075-a24b-cd42cf9f3b13'
+# Feishu OpenAPI push via daemon's own appId/appSecret
+$FeishuConfigPath = [System.IO.Path]::Combine([Environment]::GetFolderPath('UserProfile'), '.config', 'opencode', 'plugins', 'feishu.json')
+$FeishuAppId = ""
+$FeishuAppSecret = ""
+try {
+  $feishuCfg = Get-Content $FeishuConfigPath -Encoding UTF8 -Raw | ConvertFrom-Json
+  $FeishuAppId = $feishuCfg.appId
+  $FeishuAppSecret = $feishuCfg.appSecret
+} catch {}
+$FeishuChatId = "oc_82bb66a73329cf403644debd24c86ec5"
 
 function Write-Step([string]$Message, [string]$Color = 'Cyan') {
   Write-Host "  $Message" -ForegroundColor $Color
@@ -31,16 +39,22 @@ function Write-Result([string]$Message, [string]$Color = 'Green') {
 }
 
 function Send-FeishuPush([string]$Title, [string]$Body) {
-  $text = "$Title`n$Body"
+  if (-not $FeishuAppId -or -not $FeishuAppSecret) {
+    Write-Step "[warn] Feishu config not available, skip push" 'Yellow'
+    return
+  }
   try {
-    $payload = @{
-      msg_type = 'text'
-      content  = @{ text = $text }
-    } | ConvertTo-Json -Depth 5 -Compress
-    $utf8Body = [System.Text.Encoding]::UTF8.GetBytes($payload)
-    Invoke-RestMethod -Method Post -Uri $WebhookUrl -ContentType 'application/json; charset=utf-8' -Body $utf8Body -TimeoutSec 15 | Out-Null
+    $tokenBody = @{ app_id = $FeishuAppId; app_secret = $FeishuAppSecret } | ConvertTo-Json -Depth 3 -Compress
+    $tokenResp = Invoke-RestMethod -Method Post -Uri "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal" -ContentType "application/json" -Body $tokenBody -TimeoutSec 10
+    $token = $tokenResp.tenant_access_token
+    if (-not $token) { throw "No token" }
+    $text = "$Title`n$Body"
+    $msgBody = @{ receive_id = $FeishuChatId; msg_type = "text"; content = (@{ text = $text } | ConvertTo-Json -Depth 3 -Compress) } | ConvertTo-Json -Depth 5 -Compress
+    $headers = @{ Authorization = "Bearer $token" }
+    $utf8Body = [System.Text.Encoding]::UTF8.GetBytes($msgBody)
+    Invoke-RestMethod -Method Post -Uri "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id" -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $utf8Body -TimeoutSec 15 | Out-Null
   } catch {
-    Write-Step "  [warn] push notification failed: $($_.Exception.Message)" 'Yellow'
+    Write-Step "[warn] push notification failed: $($_.Exception.Message)" 'Yellow'
   }
 }
 
@@ -48,10 +62,10 @@ function Test-DaemonRunning {
   # Check PID file
   $existing = Get-Content $PidFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1
   if ($existing) {
-    $pid = [int]$existing
-    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    $existingPid = [int]$existing
+    $proc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
     if ($proc -and $proc.ProcessName -eq 'node') {
-      return $pid
+      return $existingPid
     }
   }
 

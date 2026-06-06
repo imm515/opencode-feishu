@@ -4,7 +4,7 @@ echo.
 echo  OpenCode Feishu Passive Daemon AutoStart
 echo  ==========================================
 echo.
-timeout /t 10 /nobreak
+ping 127.0.0.1 -n 11 >nul
 echo.
 echo  Starting passive daemon...
 where pwsh >nul 2>nul
@@ -15,4 +15,4 @@ if %errorlevel%==0 (
 )
 
 echo.
-timeout /t 3 /nobreak >nul
+ping 127.0.0.1 -n 4 >nul
