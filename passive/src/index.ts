@@ -32,6 +32,7 @@ const RESET = process.argv.includes("--reset-state")
 
 // Always use THIS process start time for the '"'"'session predates daemon'"'"' check.
 const DAEMON_STARTED_AT = Date.now()
+let HAS_PRIMED_CURRENT_PROCESS = false
 
 function readVersion(): string {
   try {
@@ -52,8 +53,10 @@ async function poll(): Promise<void> {
   const config = loadConfig()
   const state = loadNotifiedState()
 
-  // isStartup = true on first poll of this process when state has no _schemaVersion.
-  const isStartup = !state._schemaVersion
+  // Prime against the current daemon process once, regardless of whether a prior
+  // state file exists. Without this, a restart can treat long-archived sessions
+  // as freshly completed and bulk-send backlog done cards.
+  const isStartup = !HAS_PRIMED_CURRENT_PROCESS
   const stateStatus = isStartup ? "startup" : "running"
 
   const activeSessions = await getActiveSessions()
@@ -244,7 +247,9 @@ async function poll(): Promise<void> {
   }
 
   if (!state._schemaVersion) state._schemaVersion = 3
+  state._daemonStartedAt = DAEMON_STARTED_AT
   if (!DRY_RUN) saveNotifiedState(state)
+  HAS_PRIMED_CURRENT_PROCESS = true
   logPoll(sessions.length, pushes, detailLines.join("; ") || undefined, pushes)
   info("[cycle] pushes=" + pushes + " sessions=" + sessions.length + " status=" + stateStatus)
 }
