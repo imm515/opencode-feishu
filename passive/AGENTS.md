@@ -541,3 +541,9 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
 - 当前口径：
   - dedupe 闸门已经拿到一次正向 runtime 证据
   - 但“大任务/同 session 多轮长跑”是否完全压住重复 done，还需要继续观察真实窗口，不能因为这一次最小样本就宣布长期稳定
+- 记录口径时要明确“修复边界”：
+  - 现在可以说：当前 PID `22912` 启动后未重放历史 done，且最小 live 样本只发了 1 次 done
+  - 还不能说：所有长会话、多轮同 session、所有异常 token/重启窗口都已经彻底解决
+- Repo 边界补充：
+  - `D:\Program Files Dev` 不是 git 根
+  - `opencode-feishu`、`opencode-feishu-neomei`、`.codex/skills` 需要分别提交推送
