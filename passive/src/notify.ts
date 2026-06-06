@@ -4,6 +4,7 @@ import { sendInteractiveCard } from "./sender.js"
 import { buildCardFromDSL, type CardArgs, type CardTemplate } from "./card-dsl.js"
 import { CHAT_ID } from "./config.js"
 import { LOG_DIR } from "./paths.js"
+import { truncateMarkdown } from "./markdown.js"
 
 const THREAD_TEMPLATES: { template: CardTemplate }[] = [
   { template: "blue" },
@@ -96,7 +97,7 @@ function shortTitle(title: string | null | undefined, id: string): string {
 }
 
 function fmtTime(ms: number | null | undefined): string {
-  if (!ms) return ""
+  if (!ms) return "—"
   const d = new Date(ms)
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, "0")
@@ -126,11 +127,23 @@ export async function sendNotify(params: NotifyParams): Promise<void> {
   const sections: CardArgs["sections"] = []
   const title = `✅ OpenCode 任务完成`
   const template = threadTemplate(sessionId)
+  const cleanedText = text?.trim() ?? ""
 
+  sections.push({ type: "markdown", content: "<at id=all></at>" })
   sections.push({ type: "markdown", content: `**会话**: ${t}` })
+  if (cleanedText) {
+    sections.push({ type: "divider" })
+    sections.push({ type: "markdown", content: truncateMarkdown(cleanedText) })
+  } else {
+    sections.push({ type: "markdown", content: "_任务已完成，但没有捕获到可展示的最终文本输出。_" })
+  }
+  sections.push({ type: "divider" })
   sections.push({
     type: "note",
-    content: `结束时间: ${fmtTime(archiveTime)}  |  session: ${sessionId.slice(0, 12)}…`,
+    content:
+      `结束时间: ${fmtTime(archiveTime ?? textTime)}`
+      + `  |  最后回复: ${fmtTime(textTime)}`
+      + `  |  session: ${sessionId.slice(0, 12)}…`,
   })
   info(`[push] kind=${kind} session=${sessionId.slice(0, 12)} text_len=${text?.length ?? 0}`, {
     title,

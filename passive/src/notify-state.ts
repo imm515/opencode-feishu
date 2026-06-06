@@ -137,7 +137,18 @@ function pruneOldEntries(map: NotifiedMap): void {
   for (const key of Object.keys(map)) {
     if (key.startsWith("_")) continue
     const e = map[key]
-    if (!e || e.lastPushedAt < cutoff) delete map[key]
+    if (!e) {
+      delete map[key]
+      continue
+    }
+    const lastActivity = Math.max(
+      e.lastPushedAt ?? 0,
+      e.lastSeenTime ?? 0,
+      e.lastSeenStopTime ?? 0,
+      e.lastSeenArchiveTime ?? 0,
+      e.pendingDoneAt ?? 0,
+    )
+    if (lastActivity < cutoff) delete map[key]
   }
 }
 

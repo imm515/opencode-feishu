@@ -8,12 +8,6 @@ const BLOCKED_REPLY_CARD_TITLES = [
   "💬 OpenCode 新回复",
 ]
 
-function stripEveryoneMentions(content: string): string {
-  return content
-    .replace(/<at id=all><\/at>/gi, "")
-    .replace(/@everyone/gi, "")
-}
-
 let _token: string | null = null
 let _tokenExpire = 0
 
@@ -79,7 +73,7 @@ export async function sendInteractiveCard(
   chatId: string,
   card: object,
 ): Promise<FeishuSendResult> {
-  const content = stripEveryoneMentions(JSON.stringify(card))
+  const content = JSON.stringify(card)
   if (BLOCKED_REPLY_CARD_TITLES.some((title) => content.includes(title))) {
     return { ok: false, error: "blocked reply card payload in passive sender" }
   }

@@ -10,7 +10,10 @@
 
 param(
     [ValidateSet("start", "restart", "stop", "status")]
-    [string]$Action = "start"
+    [string]$Action = "start",
+    [ValidateSet("prod", "debug")]
+    [string]$Mode = "prod",
+    [int]$CompleteGraceMs = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +26,12 @@ $pidFile      = Join-Path $passiveRoot ".passive.pid"
 $lockFile     = Join-Path $passiveRoot ".passive.lock"
 $outLog       = Join-Path $logDir "passive.out.log"
 $errLog       = Join-Path $logDir "passive.err.log"
+$defaultProdGraceMs = 300000
+$defaultDebugGraceMs = 15000
+
+if ($CompleteGraceMs -le 0) {
+    $CompleteGraceMs = if ($Mode -eq "debug") { $defaultDebugGraceMs } else { $defaultProdGraceMs }
+}
 
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
@@ -244,9 +253,11 @@ if (-not (Test-Path $distEntry)) {
 Write-Host "[start] $($nodePath) (compiled)"
 Write-Host "[cwd]   $passiveRoot"
 Write-Host "[entry] $distEntry"
+Write-Host "[mode]  $Mode"
+Write-Host "[grace] $CompleteGraceMs ms"
 
 $proc = Start-Process -FilePath $nodePath `
-    -ArgumentList "`"$distEntry`"" `
+    -ArgumentList @("`"$distEntry`"", "--complete-grace-ms", "$CompleteGraceMs") `
     -WorkingDirectory $passiveRoot `
     -WindowStyle Hidden `
     -PassThru
@@ -262,7 +273,7 @@ $check = Get-Process -Id $nodePid -ErrorAction SilentlyContinue
 if ($check) {
     Write-Host "[verified] PID $nodePid alive at $(Get-Date -Format 'HH:mm:ss')"
     $actionLabel = if ($Action -eq "restart") { "重启" } else { "启动" }
-    Send-FeishuPush "OpenCode Feishu Passive 启动" "状态：已${actionLabel} (PID $nodePid)"
+    Send-FeishuPush "OpenCode Feishu Passive 启动" "状态：已${actionLabel} (PID $nodePid)`n模式：$Mode`n完成冷却：$CompleteGraceMs ms"
     exit 0
 } else {
     Write-Host "[fail] daemon exited within 2s — check logs"

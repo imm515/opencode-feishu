@@ -1,4 +1,4 @@
-import { loadConfig, DB_PATH, CHAT_ID, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS } from "./config.js"
+import { loadConfig, DB_PATH, CHAT_ID, WATCH_DEBOUNCE_MS, FALLBACK_CHECK_MS, COMPLETE_GRACE_MS } from "./config.js"
 import {
   getActiveSessions,
   getRecentlyArchivedSessions,
@@ -26,15 +26,15 @@ import { PKG_FILE, LOCK_FILE } from "./paths.js"
 import { FileWatcher } from "./watcher.js"
 import { createHash } from "node:crypto"
 
-const COMPLETE_GRACE_MS = 5 * 60 * 1000
-
 const DRY_RUN = process.argv.includes("--dry-run")
 const ONE_SHOT = process.argv.includes("--once")
 const VERBOSE = process.argv.includes("--verbose") || process.argv.includes("-v")
 const RESET = process.argv.includes("--reset-state")
+const DEBUG_MODE = COMPLETE_GRACE_MS < 300_000 || VERBOSE || DRY_RUN || ONE_SHOT
 
 const DAEMON_STARTED_AT = Date.now()
 let HAS_PRIMED_CURRENT_PROCESS = false
+let pendingWakeTimer: ReturnType<typeof setTimeout> | null = null
 
 function readVersion(): string {
   try {
@@ -65,7 +65,37 @@ function getPendingDoneTime(entry: SessionTrackEntry | null | undefined): number
   return entry?.pendingDoneAt ?? 0
 }
 
-async function poll(): Promise<void> {
+function schedulePendingWake(
+  state: ReturnType<typeof loadNotifiedState>,
+  onWake?: () => void,
+): void {
+  if (pendingWakeTimer) {
+    clearTimeout(pendingWakeTimer)
+    pendingWakeTimer = null
+  }
+
+  if (!onWake) return
+
+  let nextWakeAt = 0
+  for (const [sessionId, entry] of Object.entries(state)) {
+    if (sessionId.startsWith("_")) continue
+    const pendingDoneAt = getPendingDoneTime(entry as SessionTrackEntry | null)
+    if (!pendingDoneAt) continue
+    const dueAt = pendingDoneAt + COMPLETE_GRACE_MS
+    if (!nextWakeAt || dueAt < nextWakeAt) nextWakeAt = dueAt
+  }
+
+  if (!nextWakeAt) return
+
+  const delay = Math.max(0, nextWakeAt - Date.now())
+  debug("[pending:wake:schedule] dueAt=" + nextWakeAt + " delayMs=" + delay)
+  pendingWakeTimer = setTimeout(() => {
+    pendingWakeTimer = null
+    onWake()
+  }, delay)
+}
+
+async function poll(onPendingWake?: () => void): Promise<void> {
   await refreshDb()
   const config = loadConfig()
   const state = loadNotifiedState()
@@ -114,6 +144,7 @@ async function poll(): Promise<void> {
   if (sessions.length === 0) {
     if (!DRY_RUN && isStartup) saveNotifiedState(state)
     HAS_PRIMED_CURRENT_PROCESS = true
+    schedulePendingWake(state, onPendingWake)
     logPoll(0, 0, undefined, 0)
     return
   }
@@ -149,6 +180,7 @@ async function poll(): Promise<void> {
     state._daemonStartedAt = DAEMON_STARTED_AT
     if (!DRY_RUN) saveNotifiedState(state)
     HAS_PRIMED_CURRENT_PROCESS = true
+    schedulePendingWake(state, onPendingWake)
     logPoll(sessions.length, 0, undefined, 0)
     info("[cycle] pushes=0 sessions=" + sessions.length + " status=" + stateStatus)
     return
@@ -290,7 +322,16 @@ async function poll(): Promise<void> {
       const replyTime = joined.latestTime
       debug("[active:assemble] " + title + " chunks=" + joined.chunkCount + " len=" + replyText.length + " replyTime=" + replyTime)
       markSeen(state, session.id, replyTime, replyText, 0, latestStopTime)
-      clearArchiveTracking(state, session.id, replyTime, replyText)
+      const stopAdvancedNow = latestStopTime > prevStopTime
+      const stopObservedDuringRuntimeNow = latestStopTime > DAEMON_STARTED_AT
+      const noPostStopPartsNow = latestPartTime <= latestStopTime
+      if (stopAdvancedNow && stopObservedDuringRuntimeNow && noPostStopPartsNow) {
+        debug("[active:pending:same-poll] " + title + " stopTime=" + latestStopTime + " replyTime=" + replyTime + " — waiting " + COMPLETE_GRACE_MS + "ms before sending done")
+        const entry = getEntry(state, session.id)
+        if (entry) (entry as SessionTrackEntry).pendingDoneAt = latestStopTime
+      } else {
+        clearArchiveTracking(state, session.id, replyTime, replyText)
+      }
       debug("[active:skip:reply_push_disabled] " + title)
       continue
     }
@@ -359,6 +400,7 @@ async function poll(): Promise<void> {
   state._daemonStartedAt = DAEMON_STARTED_AT
   if (!DRY_RUN) saveNotifiedState(state)
   HAS_PRIMED_CURRENT_PROCESS = true
+  schedulePendingWake(state, onPendingWake)
   logPoll(sessions.length, pushes, detailLines.join("; ") || undefined, pushes)
   info("[cycle] pushes=" + pushes + " sessions=" + sessions.length + " status=" + stateStatus)
 }
@@ -380,6 +422,7 @@ async function main(): Promise<void> {
     fallbackCheckMs: FALLBACK_CHECK_MS,
     chatId: CHAT_ID,
     archiveGraceMs: COMPLETE_GRACE_MS,
+    debugMode: DEBUG_MODE,
     dryRun: DRY_RUN,
     oneShot: ONE_SHOT,
     verbose: VERBOSE,
@@ -443,19 +486,28 @@ async function main(): Promise<void> {
   info("Lock acquired, PID " + process.pid)
 
   let pollInFlight = false
+  let pollQueued = false
+  const triggerPoll = async () => {
+    if (pollInFlight) {
+      pollQueued = true
+      return
+    }
+    pollInFlight = true
+    try {
+      await poll(() => { void triggerPoll() })
+    } catch (err) {
+      error("Poll error", { e: err instanceof Error ? err.message : String(err) })
+    } finally {
+      pollInFlight = false
+      if (pollQueued) {
+        pollQueued = false
+        void triggerPoll()
+      }
+    }
+  }
   const watcher = new FileWatcher(
     DB_PATH,
-    async () => {
-      if (pollInFlight) return
-      pollInFlight = true
-      try {
-        await poll()
-      } catch (err) {
-        error("Poll error", { e: err instanceof Error ? err.message : String(err) })
-      } finally {
-        pollInFlight = false
-      }
-    },
+    async () => { void triggerPoll() },
     WATCH_DEBOUNCE_MS,
     FALLBACK_CHECK_MS,
   )
@@ -482,7 +534,7 @@ async function main(): Promise<void> {
   process.on("uncaughtException", (err) => error("uncaught", { e: err.message, s: err.stack }))
   process.on("unhandledRejection", (r) => error("unhandled", { r: String(r) }))
 
-  await poll()
+  await poll(() => { void triggerPoll() })
   if (ONE_SHOT) {
     info("--once, exiting")
     watcher.stop()

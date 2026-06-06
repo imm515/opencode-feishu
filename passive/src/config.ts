@@ -48,3 +48,4 @@ function cliInt(flag: string, fallback: number): number {
 export const POLL_INTERVAL_MS = cliInt("--poll-ms", envInt("FEISHU_POLL_MS", 20_000))
 export const WATCH_DEBOUNCE_MS = cliInt("--debounce-ms", envInt("FEISHU_DEBOUNCE_MS", 2_000))
 export const FALLBACK_CHECK_MS = cliInt("--fallback-ms", envInt("FEISHU_FALLBACK_MS", 120_000))
+export const COMPLETE_GRACE_MS = cliInt("--complete-grace-ms", envInt("FEISHU_COMPLETE_GRACE_MS", 300_000))

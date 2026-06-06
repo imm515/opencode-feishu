@@ -64,11 +64,17 @@ if (Test-Path $stateFile) {
         $count = $sessions.Count
         Write-Host "  schema  : $schemaVersion"
         Write-Host "  sessions: $count"
+        if ($state._daemonStartedAt) {
+            $daemonAt = (Get-Date 1970-01-01).AddMilliseconds([double]$state._daemonStartedAt)
+            Write-Host "  daemonAt: $daemonAt"
+        }
         if ($count -gt 0) {
             $now = Get-Date
             $recentCutoff = $now.AddMinutes(-5)
             $recent = @($sessions | Where-Object { $_.Value.lastPushedAt -and (Get-Date 1970-01-01).AddMilliseconds($_.Value.lastPushedAt) -gt $recentCutoff })
             Write-Host "  active  : $($recent.Count) pushed in last 5 min"
+            $pending = @($sessions | Where-Object { $_.Value.pendingDoneAt })
+            Write-Host "  pending : $($pending.Count) completion gate(s)"
             $top5 = $sessions | Sort-Object { $_.Value.lastPushedAt } -Descending | Select-Object -First 5
             foreach ($s in $top5) {
                 $t = (Get-Date 1970-01-01).AddMilliseconds($s.Value.lastPushedAt)

@@ -217,6 +217,137 @@ passive/src/
   - 还需要至少一次真实 archive/完成场景继续观察
   - 再决定是否把结论升级为“历史 done 重放已长期验证通过”
 
+## 2026-06-06 20:59-21:00 新补充：same-poll stop 漏建 pending 已实证修复
+
+- 本轮真正剩余的 bug 已定位为：
+  - active session 在**同一轮 poll**里同时出现 assistant 文本和 `step-finish(reason=stop)` 时，
+  - 旧逻辑会命中 `hasNew && latest.text.trim()` 分支后直接 `continue`
+  - 结果只 `markSeen(...)`，不会写 `pendingDoneAt`
+  - 后果就是：
+    - 日志看起来像“看到了新回复”
+    - `notify-state.json` 也会更新 `lastSeenStopTime`
+    - 但完成闸门从未真正建立，所以后续永远不会发完成卡
+- 当前修复点：
+  - 文件：`passive/src/index.ts`
+  - 在 `hasNew && latest.text.trim()` 分支里：
+    - 先 `markSeen(...)`
+    - 再判断：
+      - `stopAdvancedNow`
+      - `stopObservedDuringRuntimeNow`
+      - `noPostStopPartsNow`
+    - 若三者都满足，则直接写：
+      - `entry.pendingDoneAt = latestStopTime`
+    - 并记录调试语义：
+      - `[active:pending:same-poll]`
+- 当前运行态验证窗口：
+  - `npm run build`
+  - `pwsh -File passive/scripts/start.ps1 -Action restart`
+  - 新 PID：`9768`
+  - 启动时间：`2026-06-06 20:59:23 +08:00`
+- 正样本已固定：
+  - 触发命令：`opencode run "reply with exactly: passive pending check 2"`
+  - session：`ses_162fb8228ffeGXMvIvw3NU6W04`
+  - DB 证据：
+    - user text
+    - assistant `step-start`
+    - assistant text: `passive pending check 2`
+    - assistant `step-finish(reason=stop)`
+    - `time_archived = null`
+  - state 落盘证据：
+    - `lastSeenText: "passive pending check 2"`
+    - `lastSeenStopTime: 1780750781794`
+    - `pendingDoneAt: 1780750781794`
+    - `lastPushedAt: 0`
+- 这条证据已足够证明：
+  - “same-poll 文本+stop 时 pending 丢失” 这个核心 bug 已被打通
+  - 当前还**不能**直接宣布“完成卡链路完全恢复”
+  - 因为还需要等待 5 分钟静默窗后，确认：
+    - 只发 1 张 `done`
+    - 不回放旧 session
+    - 不在静默窗内提前发卡
+
+## 2026-06-06 21:07-21:13 新补充：调试模式与 pending 自动唤醒已落地
+
+- 新增调试模式入口：
+  - `passive/scripts/start.ps1 -Mode debug`
+  - 默认会带：
+    - `--complete-grace-ms 15000`
+  - 启动推送与 runtime startup 日志现在都会明确记录：
+    - `mode=debug`
+    - `archiveGraceMs=15000`
+    - `debugMode=true`
+- 新增参数化完成冷却窗：
+  - `passive/src/config.ts`
+  - 环境变量：`FEISHU_COMPLETE_GRACE_MS`
+  - CLI 参数：`--complete-grace-ms`
+  - 生产默认值仍是 `300000 ms`
+- 完成卡模板重新补厚：
+  - `passive/src/notify.ts`
+  - 完成卡不再只是“会话 + session”
+  - 现在至少包含：
+    - 会话标题
+    - 最后一条回复正文（`truncateMarkdown(...)` 后展示）
+    - 脚注：结束时间 / 最后回复时间 / session
+- 新发现并已修复的底层问题：
+  - 旧逻辑即使写入了 `pendingDoneAt`
+  - 也仍然依赖“下一次 DB 文件变化”或 `120s fallback` 才会再次 poll
+  - 这会导致：
+    - debug 模式虽然把 grace 降到 `15s`
+    - 但真实发卡时间仍可能漂到下一个外部事件
+- 当前修复点：
+  - `passive/src/index.ts`
+  - 在每次 poll 结束后，根据 state 中最早的 `pendingDoneAt + COMPLETE_GRACE_MS`
+    - 主动 `setTimeout(...)` 预约下一次自唤醒 poll
+  - watcher 事件与定时唤醒共用同一 `triggerPoll()`，避免并发 poll
+- 运行态验证：
+  - PID `15420`
+    - debug 模式 `15s`
+    - 样本：`ses_162f3ec96ffeM0G6VlcXc5uzbm`
+    - `pendingDoneAt` 建立成功
+    - 但该窗口仍是在后续事件到来时才发出 done，坐实了“缺少到点自唤醒”的问题
+  - PID `2704`
+    - 含自动唤醒修复后的 debug 窗口
+    - 样本：`ses_162efb9a2ffe30jKsIN2ArDP7X`
+    - assistant text：`passive auto wake rich test`
+    - `pendingDoneAt = 1780751553046`
+    - `lastPushedAt = 1780751569101`
+    - 日志：
+      - `21:12:30` startup
+      - `21:12:35` sample observed
+    - `21:12:48` `[push] kind=done ... text_len=27`
+    - 这次 done 发卡与新的 DB 外部变化无关，证明到点自动唤醒已生效
+
+## 2026-06-06 21:14-21:15 新补充：完成卡 @all 恢复，且不再被 sender 剥离
+
+- 用户补充需求：`done` 卡需要 `@所有人`
+- 当前修复点：
+  - `passive/src/notify.ts`
+    - 完成卡 sections 顶部重新加入：
+      - `<at id=all></at>`
+  - `passive/src/sender.ts`
+    - 删除对 interactive card payload 的全局 `stripEveryoneMentions(...)`
+    - 原因：
+      - passive 已经严格 done-only
+      - 再全局剥离 `@all` 会把用户明确要求的完成提醒一并吃掉
+      - reply card 本身仍由 `BLOCKED_REPLY_CARD_TITLES` 阻断，不会因为放开 `@all` 而回到中间卡
+- 运行态验证窗口：
+  - PID：`23980`
+  - debug 模式：`archiveGraceMs=15000`
+  - 样本：`ses_162ed8c34ffe0znQw1ycasQc0U`
+  - assistant text：`passive all mention final test`
+  - `pendingDoneAt = 1780751699289`
+  - `lastPushedAt = 1780751715308`
+  - 日志：
+    - `21:14:53` startup
+    - `21:15:14` `[push] kind=done ... text_len=30`
+    - `21:15:15` sent
+- 当前可确认的结论：
+  - debug 模式下：
+    - 15 秒冷却窗仍然生效
+    - 到点自动唤醒仍然生效
+    - 完成卡正文仍带最后回复文本
+    - sender 不再剥离 `@all`
+
 ## 目录结构
 
 ```
