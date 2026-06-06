@@ -100,6 +100,15 @@ function getProvisionalDoneReason(text: string): string | null {
   if (/[.]{3}$/.test(normalized) || /[。．｡…]{1,2}$/.test(normalized)) {
     return "trailing-ellipsis"
   }
+  if (/让我[手先再看查试改补帮弄]/.test(normalized)) {
+    return "unfinished-let-me"
+  }
+  if (/[`"'“‘（(\[{]$/.test(lastChar)) {
+    return "dangling-quote"
+  }
+  if (!/[。！？!?】〕】》」』"'”’)\]]$/.test(normalized)) {
+    return "missing-final-punctuation"
+  }
   if (/[\p{L}\p{N}]$/u.test(lastChar) && normalized.length < 24) {
     return "short-bare-tail"
   }
