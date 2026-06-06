@@ -1,12 +1,18 @@
-# opencode-feishu passive monitor — uninstall Windows Task Scheduler entry
-
 $taskName = "OpenCodeFeishuPassive"
+$startupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+$shortcutPath = Join-Path $startupDir 'OpenCodeFeishuPassive.lnk'
 
 $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if (-not $existing) {
-    Write-Host "[skip] task '$taskName' not registered"
-    exit 0
+if ($existing) {
+    try {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+        Write-Host "[ok] task '$taskName' unregistered"
+    } catch {
+        Write-Host "[warn] could not remove task '$taskName': $($_.Exception.Message)"
+    }
 }
 
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-Write-Host "[ok] task '$taskName' unregistered"
+if (Test-Path $shortcutPath) {
+    Remove-Item -LiteralPath $shortcutPath -Force
+    Write-Host "[ok] removed $shortcutPath"
+}

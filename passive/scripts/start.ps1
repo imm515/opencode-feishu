@@ -287,6 +287,7 @@ if ($check) {
 } else {
     Write-Host "[fail] daemon exited within 2s — check logs"
     Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
     Send-FeishuPush "OpenCode Feishu Passive 启动" "状态：启动失败 (PID $nodePid exited)"
     exit 1
 }
