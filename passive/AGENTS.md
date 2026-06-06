@@ -571,3 +571,14 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
   - 候选完成证据是什么时间出现的
   - quiet window 内是否又恢复输出 / 继续 tool
   - 为什么这次没有发完成卡
+
+## 2026-06-06 22:21 status 脚本口径修复
+
+- 如果 `passive` 新 PID 明明已经启动，但 `start.ps1 -Action status` 还显示旧 PID，不要先怀疑 daemon 本体。
+- 本机真实踩到的根因是：
+  - `status` 之前会把实时进程扫描结果和旧 `.passive.pid` / `.passive.lock` 混在一起显示
+  - 导致短窗口内可能看到“旧 PID not alive”之类的误导输出
+- 现口径：
+  - `Show-Status` 优先以 `Find-AllDaemonPids()` 的实时扫描为准
+  - 一旦扫到真实 daemon，会立刻回写 `.passive.pid` 与 `.passive.lock`
+  - 只有完全扫不到 live daemon 时，才回退到旧 pid/lock 文件做 stale 提示

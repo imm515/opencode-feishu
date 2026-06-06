@@ -250,7 +250,8 @@ async function poll(onPendingWake?: () => void): Promise<void> {
 
       const elapsed = Date.now() - pendingDoneTime
       if (elapsed < COMPLETE_GRACE_MS) {
-        debug("[arch:wait] " + title + " pendingDoneAt=" + pendingDoneTime + " elapsed=" + elapsed + "ms — still waiting")
+        const remaining = COMPLETE_GRACE_MS - elapsed
+        debug("[arch:wait] " + title + " pendingDoneAt=" + pendingDoneTime + " elapsed=" + elapsed + "ms remaining=" + remaining + "ms — still waiting")
         continue
       }
 
@@ -404,7 +405,8 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       }
 
       if (elapsed < COMPLETE_GRACE_MS) {
-        debug("[active:wait] " + title + " pendingDoneAt=" + pendingDoneTime + " elapsed=" + elapsed + "ms")
+        const remaining = COMPLETE_GRACE_MS - elapsed
+        debug("[active:wait] " + title + " pendingDoneAt=" + pendingDoneTime + " elapsed=" + elapsed + "ms remaining=" + remaining + "ms")
         continue
       }
 

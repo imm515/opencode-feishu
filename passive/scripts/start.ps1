@@ -64,11 +64,19 @@ function Stop-AllDaemons {
 }
 
 function Show-Status {
-    $pids = Find-AllDaemonPids
-    $lockPid = Get-LockPid
-    if ($lockPid -and ($pids -notcontains $lockPid)) { $pids += $lockPid }
-    $pidFilePid = Get-PidFilePid
-    if ($pidFilePid -and ($pids -notcontains $pidFilePid)) { $pids += $pidFilePid }
+    $pids = @(Find-AllDaemonPids)
+    if ($pids.Count -gt 0) {
+        $pids = @($pids | Sort-Object -Unique)
+        $primaryPid = $pids[0]
+        [System.IO.File]::WriteAllText($pidFile, "$primaryPid")
+        [System.IO.File]::WriteAllText($lockFile, "$primaryPid")
+    } else {
+        $lockPid = Get-LockPid
+        if ($lockPid) { $pids += $lockPid }
+        $pidFilePid = Get-PidFilePid
+        if ($pidFilePid) { $pids += $pidFilePid }
+        $pids = @($pids | Sort-Object -Unique)
+    }
     if ($pids.Count -eq 0) {
         Write-Host "[status] daemon: not running"
         if (Test-Path $pidFile) { Write-Host "[status] stale pid file: $((Get-Content $pidFile) -join '')" }
