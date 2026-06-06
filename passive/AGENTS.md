@@ -518,3 +518,26 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
 - 注意边界：
   - 这个闸门是拦同一完成窗口的重复发卡
   - 不是禁止同一 session 后续新 user turn 再发新的完成卡
+
+## 2026-06-06 21:59 新窗口 live 复核
+
+- 受控重启：
+  - `powershell -ExecutionPolicy Bypass -File passive/scripts/start.ps1 -Action restart -Mode debug`
+  - 新 PID：`22912`
+  - 启动时间：`2026-06-06 21:59:05 +08:00`
+- 启动后第一轮关键观察：
+  - 未出现 startup 立即历史 done 批量重放
+  - 日志仅见：
+    - `pushes=0 sessions=137 status=startup`
+    - 随后进入 `running`
+- 最小 live 场景：
+  - 触发：`opencode run "reply with exactly: passive-dedupe-live-check-22912"`
+  - session：`ses_162c4a5f...`
+  - title：`Exact string repetition test`
+  - 日志：
+    - `21:59:52` `push kind=done`
+    - `21:59:53` `push sent`
+  - 额外等待约 `25s` 复查，同一 session 未见第二次 `done`
+- 当前口径：
+  - dedupe 闸门已经拿到一次正向 runtime 证据
+  - 但“大任务/同 session 多轮长跑”是否完全压住重复 done，还需要继续观察真实窗口，不能因为这一次最小样本就宣布长期稳定
