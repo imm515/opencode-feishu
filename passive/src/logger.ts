@@ -47,7 +47,7 @@ function doLog(level: string, tag: string, msg: string, extra?: Record<string, u
   ensureLogDir()
   const ts = toLocalIso(new Date())
   const extraStr = extra ? ` ${JSON.stringify(extra)}` : ""
-  const line = `[${ts}] [${level}] [${tag}] ${msg}${extraStr}\n`
+  const line = `[${ts}] [${level}] [${tag}] [pid=${process.pid}] ${msg}${extraStr}\n`
   process.stderr.write(line)
   try { appendFileSync(logPath(), line) } catch { /* skip */ }
 }
@@ -71,7 +71,7 @@ export function logPoll(sessions: number, transitions: number, details?: string,
   const d = toLocalIso(new Date())
   const extraStr = details ? ` detail="${details}"` : ""
   const stateStr = stateChanges > 0 ? ` stateChanges=${stateChanges}` : ""
-  const line = `[${d}] [INFO] [passive] poll: sessions=${sessions} transitions=${transitions}${stateStr}${extraStr}\n`
+  const line = `[${d}] [INFO] [passive] [pid=${process.pid}] poll: sessions=${sessions} transitions=${transitions}${stateStr}${extraStr}\n`
   process.stderr.write(line)
   ensureLogDir()
   try { appendFileSync(logPath(), line) } catch { /* skip */ }

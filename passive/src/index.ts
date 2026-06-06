@@ -117,6 +117,15 @@ async function poll(): Promise<void> {
 
           // Record pendingDoneAt — done card is deferred until ARCHIVE_GRACE_MS expires.
           // If the session reactivates before then, the cancel-check above clears pendingDoneAt.
+          const daemonSeenLive =
+            (prev?.lastSeenTime ?? 0) > DAEMON_STARTED_AT
+            || (prev?.lastPushedAt ?? 0) > DAEMON_STARTED_AT
+          if (!daemonSeenLive) {
+            debug("[arch:skip:predates-daemon] " + title + " archiveTime=" + archiveTime + " prevSeen=" + (prev?.lastSeenTime ?? 0) + " daemonStart=" + DAEMON_STARTED_AT)
+            markSeen(state, session.id, prev?.lastSeenTime ?? archiveTime, prev?.lastSeenText ?? "", archiveTime)
+            continue
+          }
+
           debug("[arch:pending] " + title + " archiveTime=" + archiveTime + " — waiting " + ARCHIVE_GRACE_MS + "ms before sending done")
           const prevTimeVal = prev?.lastSeenTime ?? 0
           const prevTextVal = prev?.lastSeenText ?? ""

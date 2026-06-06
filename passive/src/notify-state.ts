@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, rmSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, rmSync, copyFileSync } from "node:fs"
 import { LOG_DIR, STATE_FILE } from "./paths.js"
+import { error as logError } from "./logger.js"
 
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -49,7 +50,7 @@ function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
     Number(entry.lastDoneTime ?? 0) || 0,
   )
   const lastPushedAt = Number(entry.lastPushedAt ?? 0) || 0
-  const pendingDoneAt = Number((raw as any).pendingDoneAt ?? 0) || undefined
+  const pendingDoneAt = Number((raw as any).pendingDoneAt ?? entry.pendingDoneTime ?? 0) || undefined
   return {
     lastSeenTime,
     lastSeenText,
@@ -94,11 +95,20 @@ export function saveNotifiedState(map: NotifiedMap): void {
   normalized._schemaVersion = SCHEMA_VERSION
   const tmp = STATE_FILE + ".tmp"
   try {
-    writeFileSync(tmp, JSON.stringify(normalized, null, 2), "utf-8")
-    // Windows renameSync cannot replace an existing file atomically like POSIX.
-    rmSync(STATE_FILE, { force: true })
-    renameSync(tmp, STATE_FILE)
-  } catch { /* skip */ }
+    const body = JSON.stringify(normalized, null, 2)
+    writeFileSync(tmp, body, "utf-8")
+    try {
+      // Windows renameSync cannot replace an existing file atomically like POSIX.
+      rmSync(STATE_FILE, { force: true })
+      renameSync(tmp, STATE_FILE)
+    } catch {
+      // Fallback to direct overwrite if tmp->target replacement loses the race on Windows.
+      copyFileSync(tmp, STATE_FILE)
+      rmSync(tmp, { force: true })
+    }
+  } catch (err) {
+    logError("[state] save failed", { file: STATE_FILE, e: err instanceof Error ? err.message : String(err) })
+  }
 }
 
 function pruneOldEntries(map: NotifiedMap): void {

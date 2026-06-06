@@ -92,6 +92,21 @@ passive/src/
   - 进程命令行应为：`node ...\passive\dist\index.js`
   - `2026-06-06.log` 在新 `starting {"pid":...}` 之后，只允许出现 `done`，不应再出现新的 `kind=reply`
 
+## 2026-06-06 运行态校验再补充：日志必须带 PID
+
+- 同一个飞书 app / chat 里，可能同时出现：
+  - passive 完成卡
+  - 用户自己活跃中的 `opencode` 会话结果
+  - NeoMei / 主插件其他消息
+- 仅凭“同一聊天里出现了卡片”或“卡片长得像 passive”不足以证明就是 passive 当前进程发的。
+- 因此 passive 日志现在必须带：
+  - `[pid=<node pid>]`
+- 审计顺序必须升级为：
+  1. 先看最新 `starting {"pid":...}` 行
+  2. 再只采信同一 PID 的后续 `[push]` / `poll:` 日志
+  3. 没有 PID 标签的旧窗口结论，不能拿来指控当前新进程
+- 这条规则是为了避免把用户自己正在运行的 `opencode` 会话输出，误判成 passive reply/card 误发。
+
 ## 目录结构
 
 ```
