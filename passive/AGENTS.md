@@ -68,6 +68,8 @@ passive/src/
 | `waiting→working` | 再次出现 tool(running) 或 reasoning | 🔄 OpenCode 正在继续 |
 | `any→done` | `session.time_archived` 不为空 | ✅ OpenCode 任务完成 |
 
+完成卡当前以 `session.time_archived` 作为唯一可信完成信号。不要再把 active session 里的 `step-finish(stop)` 当作完成推送条件，否则会出现“实际上还没结束，但先弹完成卡”的误报。
+
 ## 目录结构
 
 ```

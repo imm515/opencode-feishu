@@ -4,7 +4,6 @@ import {
   getRecentlyArchivedSessions,
   getLatestAssistantPart,
   getAssistantTextSince,
-  getLatestStepFinishStopTime,
   getLatestPartTime,
   closeDb,
   refreshDb,
@@ -14,11 +13,8 @@ import {
   loadNotifiedState,
   saveNotifiedState,
   recordPush,
-  recordDone,
   markSeen,
   getEntry,
-  setPendingDone,
-  clearPendingDone,
 } from "./notify-state.js"
 import { info, error, debug, logPoll, setVerbose } from "./logger.js"
 import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs"
@@ -127,14 +123,7 @@ async function poll(): Promise<void> {
       if (isStartup) {
         const letP = await getLatestPartTime(session.id)
         debug("[active:prime] " + title + " latestPartTime=" + letP)
-
-        // Seed lastDoneTime = stop time for sessions that already have step-finish(stop)
-        // Prevents immediate re-push: stopTime > lastDoneTime is false when both equal
-        const startStop = await getLatestStepFinishStopTime(session.id)
         markSeen(state, session.id, letP, "", 0)
-        if (startStop) {
-          state[session.id].lastDoneTime = startStop
-        }
         continue
       }
 
@@ -157,9 +146,8 @@ async function poll(): Promise<void> {
       }
 
       const hasNew = latestTime > prevTime
-      const ctxStop = await getLatestStepFinishStopTime(session.id)
       const ctxLatest = await getLatestPartTime(session.id)
-      debug("[active:check] " + title + " latestTime=" + latestTime + " hasNew=" + hasNew + " stop=" + ctxStop + " latestPart=" + ctxLatest + " isLast=" + (ctxLatest === ctxStop))
+      debug("[active:check] " + title + " latestTime=" + latestTime + " hasNew=" + hasNew + " latestPart=" + ctxLatest)
 
       let latestText = ""
 
@@ -186,7 +174,7 @@ async function poll(): Promise<void> {
         // No intermediate reply card is pushed.
         latestText = replyText
         markSeen(state, session.id, replyTime, replyText, 0)
-        debug("[active:skip:reply_push_disabled] " + title + " stop=" + ctxStop + " latest=" + ctxLatest + " isLast=" + (ctxLatest === ctxStop))
+        debug("[active:skip:reply_push_disabled] " + title + " latestPart=" + ctxLatest)
       } else if (hasNew) {
         debug("[active:skip:empty] " + title + " latestTime=" + latestTime + " text is empty")
         markSeen(state, session.id, latestTime, "", 0)
@@ -194,62 +182,6 @@ async function poll(): Promise<void> {
 
       if (!hasNew) {
         markSeen(state, session.id, latestTime, "", 0)
-      }
-
-      // Done detection: debounce by one poll cycle (20s)
-      // Only fire done when the LAST event in the session is a step-finish(stop).
-      // If newer parts (step-start, text, tool) exist after the stop, the session is still active.
-      const stopTime = ctxStop
-      const latestPartTime = ctxLatest
-      const curEntry = getEntry(state, session.id)
-      const lastDone = curEntry?.lastDoneTime ?? 0
-      const pendingDone = curEntry?.pendingDoneTime ?? 0
-      const isLastPartStop = latestPartTime === stopTime
-
-      if (stopTime > DAEMON_STARTED_AT && stopTime > lastDone) {
-        if (pendingDone) {
-          if (stopTime > pendingDone) {
-            // Newer stop appeared — update pending
-            setPendingDone(state, session.id, stopTime)
-            debug("[active:pending:updated] " + title + " stopTime=" + stopTime)
-          } else if (isLastPartStop) {
-            // Same stop AND it's the last part in the session — fire done
-            const latestTextForDone = latestText || ((await getLatestAssistantPart(session.id))?.text ?? "")
-            try {
-              debug("[active:PUSH:done] " + title + " stopTime=" + stopTime + " latestPartTime=" + latestPartTime)
-              if (!DRY_RUN) {
-                await sendNotify({
-                  appId: config.appId,
-                  appSecret: config.appSecret,
-                  sessionId: session.id,
-                  sessionTitle: session.title,
-                  kind: "done",
-                  text: latestTextForDone || null,
-                  archiveTime: stopTime,
-                  textTime: stopTime,
-                })
-              }
-              recordDone(state, session.id, stopTime)
-              pushes++
-              detailLines.push("done: " + title)
-              markSeen(state, session.id, stopTime, "", 0)
-            } catch (err) {
-              error("done push failed: " + session.id, { e: err instanceof Error ? err.message : String(err) })
-            }
-          } else {
-            // New activity appeared after the stop — clear pending, session still active
-            clearPendingDone(state, session.id)
-            debug("[active:pending:cleared:newact] " + title + " stopTime=" + stopTime + " latestPartTime=" + latestPartTime)
-          }
-        } else {
-          // First detection — set pending, wait one cycle
-          setPendingDone(state, session.id, stopTime)
-          debug("[active:pending:set] " + title + " stopTime=" + stopTime + " will fire next poll if no new content")
-        }
-      } else if (pendingDone && (stopTime <= lastDone || !isLastPartStop)) {
-        // Either already done or new activity appeared — clear stale pending
-        clearPendingDone(state, session.id)
-        debug("[active:pending:cleared] " + title + " stopTime=" + stopTime + " already=" + (stopTime <= lastDone) + " isLastPartStop=" + isLastPartStop)
       }
     }
   }
