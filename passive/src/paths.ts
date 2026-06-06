@@ -8,6 +8,7 @@ export const PASSIVE_DIR = join(MODULE_DIR, "..")
 export const LOG_DIR = join(PASSIVE_DIR, "logs")
 export const STATE_FILE = join(LOG_DIR, "notify-state.json")
 export const PID_FILE = join(PASSIVE_DIR, ".passive.pid")
+export const LOCK_FILE = join(PASSIVE_DIR, ".passive.lock")
 export const DIST_ENTRY = join(PASSIVE_DIR, "dist", "index.js")
 export const PKG_FILE = join(PASSIVE_DIR, "package.json")
 

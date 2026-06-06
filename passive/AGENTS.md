@@ -160,6 +160,23 @@ passive/src/
   3. 再直接读取 `passive/logs/notify-state.json` 实际落盘字段
   4. 最后才允许写“已恢复 / 已修复”类结论
 
+## 2026-06-06 20:27 审计补充：区分“单实例已改善”和“历史完成已修复”
+
+- 当前已确认改善的范围只有：
+  - `passive/scripts/start.ps1` 连续执行两次时，第二次会跳过，复用当前 PID
+  - 也就是“重复手动启动直接多开第二实例”这层已有正向证据
+- 当前**尚未**确认已修复的范围：
+  - `notify-state.json` 里仍可观察到一批数据库 `time_archived IS NULL` 的 active session
+  - 其 state 条目却仍带 `lastSeenArchiveTime > 0`
+  - 这说明 startup/state 语义仍可能把 active session 误保留为“曾归档”
+- 因此从现在起，审计措辞必须分开写：
+  1. 可以说：`当前未发现多开`
+  2. 可以说：`新窗口启动后暂未复现 transitions=36`
+  3. 不可以说：`历史完成狂推已彻底修复`
+- 只有当下面两条同时满足，才允许升级结论：
+  - 新窗口长时间在线后仍无新的历史 done 批量重放
+  - `notify-state.json` 中 active session 不再残留 `lastSeenArchiveTime > 0`
+
 ## 目录结构
 
 ```

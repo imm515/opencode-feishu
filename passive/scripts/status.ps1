@@ -2,6 +2,7 @@
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $passiveRoot = Resolve-Path (Join-Path $scriptRoot "..")
 $pidFile = Join-Path $passiveRoot ".passive.pid"
+$lockFile = Join-Path $passiveRoot ".passive.lock"
 $logDir = Join-Path $passiveRoot "logs"
 $stateFile = Join-Path $logDir "notify-state.json"
 $outLog = Join-Path $logDir "passive.out.log"
@@ -9,18 +10,29 @@ $errLog = Join-Path $logDir "passive.err.log"
 
 Write-Host "=== opencode-feishu passive status ==="
 Write-Host "pidfile: $pidFile"
+Write-Host "lockfile: $lockFile"
 Write-Host ""
 
-$procId = (Get-Content $pidFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
-if (-not $procId) {
-    Write-Host "state: NOT RUNNING (no .passive.pid)"
+$tracked = @()
+foreach ($path in @($pidFile, $lockFile)) {
+    $raw = (Get-Content $path -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+    if ($raw) { $tracked += [int]$raw }
+}
+$tracked = @($tracked | Sort-Object -Unique)
+
+if ($tracked.Count -eq 0) {
+    Write-Host "state: NOT RUNNING (no tracked pid/lock)"
 } else {
-    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-    if (-not $proc) {
-        Write-Host "state: STALE PID ($procId not alive)"
-    } elseif ($proc.ProcessName -ne "node") {
-        Write-Host "state: MISMATCH (PID $procId is $($proc.ProcessName), not node)"
-    } else {
+    foreach ($procId in $tracked) {
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if (-not $proc) {
+            Write-Host "state: STALE PID ($procId not alive)"
+            continue
+        }
+        if ($proc.ProcessName -ne "node") {
+            Write-Host "state: MISMATCH (PID $procId is $($proc.ProcessName), not node)"
+            continue
+        }
         $cpu = "{0:N1}" -f $proc.CPU
         $ws  = "{0:N1} MB" -f ($proc.WorkingSet64 / 1MB)
         $uptime = (Get-Date) - $proc.StartTime

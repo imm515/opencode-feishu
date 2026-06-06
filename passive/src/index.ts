@@ -22,7 +22,7 @@ import {
 } from "./notify-state.js"
 import { info, error, debug, logPoll, setVerbose } from "./logger.js"
 import { readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs"
-import { PKG_FILE } from "./paths.js"
+import { PKG_FILE, LOCK_FILE } from "./paths.js"
 import { FileWatcher } from "./watcher.js"
 import { createHash } from "node:crypto"
 
@@ -53,6 +53,13 @@ function shortTitle(title: string | null | undefined, id: string): string {
 
 function hashText(text: string): string {
   return createHash("sha1").update(text).digest("hex").slice(0, 12)
+}
+
+function hasRuntimeDoneEvidence(entry: SessionTrackEntry | null | undefined): boolean {
+  if (!entry) return false
+  const seenAfterStart = (entry.lastSeenTime ?? 0) > DAEMON_STARTED_AT
+  const hasAssistantText = (entry.lastSeenText ?? "").trim().length > 0
+  return seenAfterStart && hasAssistantText
 }
 
 async function poll(): Promise<void> {
@@ -150,11 +157,16 @@ async function poll(): Promise<void> {
 
           // Record pendingDoneAt — done card is deferred until ARCHIVE_GRACE_MS expires.
           // If the session reactivates before then, the cancel-check above clears pendingDoneAt.
-          const daemonSeenLive =
-            (prev?.lastSeenTime ?? 0) > DAEMON_STARTED_AT
-            || (prev?.lastPushedAt ?? 0) > DAEMON_STARTED_AT
+          const daemonSeenLive = hasRuntimeDoneEvidence(prev)
           if (!daemonSeenLive) {
-            debug("[arch:skip:predates-daemon] " + title + " archiveTime=" + archiveTime + " prevSeen=" + (prev?.lastSeenTime ?? 0) + " daemonStart=" + DAEMON_STARTED_AT)
+            debug(
+              "[arch:skip:no-runtime-evidence] "
+              + title
+              + " archiveTime=" + archiveTime
+              + " prevSeen=" + (prev?.lastSeenTime ?? 0)
+              + " textLen=" + ((prev?.lastSeenText ?? "").trim().length)
+              + " daemonStart=" + DAEMON_STARTED_AT
+            )
             markSeen(state, session.id, prev?.lastSeenTime ?? archiveTime, prev?.lastSeenText ?? "", archiveTime)
             continue
           }
@@ -307,7 +319,7 @@ async function poll(): Promise<void> {
     }
   }
 
-  if (!state._schemaVersion) state._schemaVersion = 3
+  if (!state._schemaVersion || state._schemaVersion < 4) state._schemaVersion = 4
   state._daemonStartedAt = DAEMON_STARTED_AT
   if (!DRY_RUN) saveNotifiedState(state)
   HAS_PRIMED_CURRENT_PROCESS = true
@@ -358,10 +370,9 @@ async function main(): Promise<void> {
   }
 
   // Single-instance lock via exclusive file create (OS-atomic on Windows)
-  const lockFile = ".passive.lock"
   function acquireLock(): boolean {
     try {
-      const fd = openSync(lockFile, "wx")
+      const fd = openSync(LOCK_FILE, "wx")
       writeFileSync(fd, String(process.pid))
       closeSync(fd)
       return true
@@ -372,13 +383,13 @@ async function main(): Promise<void> {
   }
   if (!acquireLock()) {
     try {
-      const existingPid = parseInt(readFileSync(lockFile, "utf-8").trim(), 10)
+      const existingPid = parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10)
       if (!isNaN(existingPid)) {
         try { process.kill(existingPid, 0); info("Another daemon (PID " + existingPid + ") is running, exiting"); process.exit(0) }
         catch { /* stale lock */ }
       }
     } catch { /* skip */ }
-    unlinkSync(lockFile)
+    unlinkSync(LOCK_FILE)
     if (!acquireLock()) { error("Cannot acquire lock even after removing stale file"); process.exit(3) }
   }
   info("Lock acquired, PID " + process.pid)
@@ -399,9 +410,9 @@ async function main(): Promise<void> {
     watcher.stop()
     closeDb()
     try {
-      const currentPid = parseInt(readFileSync(lockFile, "utf-8").trim(), 10)
+      const currentPid = parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10)
       if (currentPid === process.pid) {
-        unlinkSync(lockFile)
+        unlinkSync(LOCK_FILE)
         info("Lock released")
       }
     } catch {}
@@ -418,8 +429,8 @@ async function main(): Promise<void> {
     info("--once, exiting")
     watcher.stop()
     try {
-      const currentPid = parseInt(readFileSync(lockFile, "utf-8").trim(), 10)
-      if (currentPid === process.pid) unlinkSync(lockFile)
+      const currentPid = parseInt(readFileSync(LOCK_FILE, "utf-8").trim(), 10)
+      if (currentPid === process.pid) unlinkSync(LOCK_FILE)
     } catch {}
     process.exit(0)
   }

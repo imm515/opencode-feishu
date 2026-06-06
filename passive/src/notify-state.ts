@@ -25,7 +25,7 @@ export type NotifiedMap = Record<string, SessionTrackEntry> & {
   _daemonStartedAt?: number
 }
 
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 4
 
 function ensureDir(): void {
   if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true })
@@ -46,14 +46,13 @@ function sanitizeEntry(raw: unknown): SessionTrackEntry | null {
   const lastSeenTime = Number(entry.lastSeenTime ?? 0) || 0
   const lastSeenText = typeof entry.lastSeenText === "string" ? entry.lastSeenText : ""
   const lastPushedAt = Number(entry.lastPushedAt ?? 0) || 0
-  // Legacy state files often stored "done already sent" in lastDoneTime while leaving
-  // lastSeenArchiveTime at 0. Since the done card is emitted after archive/grace, the
-  // push timestamp is a stronger lower bound for "this archive was already handled".
-  const lastSeenArchiveTime = Math.max(
-    Number(entry.lastSeenArchiveTime ?? 0) || 0,
-    Number(entry.lastDoneTime ?? 0) || 0,
-    lastPushedAt,
-  )
+  // Only explicit archive markers should drive archive tracking.
+  // Older state may have persisted done-only evidence in lastDoneTime, so use that
+  // only when lastSeenArchiveTime itself is absent. Never infer archive state from
+  // lastPushedAt, because active sessions can legitimately have old push history.
+  const explicitArchiveTime = Number(entry.lastSeenArchiveTime ?? 0) || 0
+  const legacyDoneTime = Number(entry.lastDoneTime ?? 0) || 0
+  const lastSeenArchiveTime = explicitArchiveTime || legacyDoneTime
   const pendingDoneAt = Number((raw as any).pendingDoneAt ?? entry.pendingDoneTime ?? 0) || undefined
   return {
     lastSeenTime,
@@ -169,7 +168,7 @@ export function markSeen(
     lastSeenText: text,
     lastSeenArchiveTime: archiveTime || (cur?.lastSeenArchiveTime ?? 0),
     pendingDoneAt: cur?.pendingDoneAt,
-    lastPushedAt: cur?.lastPushedAt ?? Date.now(),
+    lastPushedAt: cur?.lastPushedAt ?? 0,
   }
 }
 
@@ -184,8 +183,10 @@ export function clearArchiveTracking(
   map[sessionId] = {
     lastSeenTime: Math.max(cur.lastSeenTime ?? 0, partTime ?? 0),
     lastSeenText: typeof text === "string" ? text : (cur.lastSeenText ?? ""),
+    // Active sessions must not retain archive markers; otherwise a restart can
+    // treat old archived state as if it still applies to the current live session.
     lastSeenArchiveTime: 0,
-    lastPushedAt: cur.lastPushedAt ?? Date.now(),
+    lastPushedAt: cur.lastPushedAt ?? 0,
   }
 }
 
