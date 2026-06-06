@@ -547,3 +547,27 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
 - Repo 边界补充：
   - `D:\Program Files Dev` 不是 git 根
   - `opencode-feishu`、`opencode-feishu-neomei`、`.codex/skills` 需要分别提交推送
+
+## 2026-06-06 22:16 分层激活 / 边界调试补充
+
+- passive 当前不是固定 `20s` 轮询：
+  - `watchDebounceMs = 2000`
+    - DB 文件变化驱动，约 `2s` 去抖后处理
+  - `fallbackCheckMs = 120000`
+    - 长时间没变化时，`120s` 才做一次保底检查
+  - `archiveGraceMs = 15000`
+    - debug 模式下的完成冷却窗口，不是轮询周期
+- 这套属于分层激活：
+  - 有变化时快速响应
+  - 没变化时低频保底
+  - 资源友好，不是粗暴高频轮询
+- 当前推荐的边界调试真相源：
+  - 日日志：`passive/logs/YYYY-MM-DD.log`
+  - 持久状态：`passive/logs/notify-state.json`
+- 新增日志原因码：
+  - `active:no-done-evidence`
+  - `active:no-done-transition`
+- 这两类日志用来回答：
+  - 候选完成证据是什么时间出现的
+  - quiet window 内是否又恢复输出 / 继续 tool
+  - 为什么这次没有发完成卡

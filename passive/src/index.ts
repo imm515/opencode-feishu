@@ -365,6 +365,16 @@ async function poll(onPendingWake?: () => void): Promise<void> {
         const entry = getEntry(state, session.id)
         if (entry) (entry as SessionTrackEntry).pendingDoneAt = latestStopTime
       } else {
+        debug(
+          "[active:no-done-evidence] "
+          + title
+          + " replyTime=" + replyTime
+          + " stopAdvanced=" + stopAdvancedNow
+          + " stopObservedDuringRuntime=" + stopObservedDuringRuntimeNow
+          + " noPostStopParts=" + noPostStopPartsNow
+          + " latestPartTime=" + latestPartTime
+          + " latestStopTime=" + latestStopTime
+        )
         clearArchiveTracking(state, session.id, replyTime, replyText)
       }
       debug("[active:skip:reply_push_disabled] " + title)
@@ -445,6 +455,17 @@ async function poll(onPendingWake?: () => void): Promise<void> {
       continue
     }
 
+    debug(
+      "[active:no-done-transition] "
+      + title
+      + " latestTime=" + latestTime
+      + " stopAdvanced=" + stopAdvanced
+      + " stopObservedDuringRuntime=" + stopObservedDuringRuntime
+      + " noPostStopParts=" + noPostStopParts
+      + " hasRuntimeDoneEvidence=" + hasRuntimeDoneEvidence(prev)
+      + " latestPartTime=" + latestPartTime
+      + " latestStopTime=" + latestStopTime
+    )
     clearArchiveTracking(state, session.id, latestTime, prev?.lastSeenText ?? "")
   }
 
