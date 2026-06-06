@@ -5,6 +5,7 @@ import {
   getLatestAssistantPart,
   getAssistantTextSince,
   getLatestPartTime,
+  getLatestStepFinishStopTime,
   closeDb,
   refreshDb,
 } from "./db.js"
@@ -126,8 +127,34 @@ async function poll(): Promise<void> {
         if (entry?.pendingDoneAt) {
           const elapsed = Date.now() - entry.pendingDoneAt
           if (elapsed >= ARCHIVE_GRACE_MS) {
-            // Timer expired — send the done card.
-            debug("[arch:fire:done] " + title + " elapsed=" + elapsed + "ms >= " + ARCHIVE_GRACE_MS + "ms — sending done")
+            const latestPartTime = await getLatestPartTime(session.id)
+            const latestStopTime = await getLatestStepFinishStopTime(session.id)
+            const hasStopEvidence = latestStopTime > 0
+            const stopCoversArchive = latestStopTime >= archiveTime
+            const noPostArchiveParts = latestPartTime <= archiveTime
+
+            if (!hasStopEvidence || !stopCoversArchive || !noPostArchiveParts) {
+              debug(
+                "[arch:skip:not-final] "
+                + title
+                + " latestPartTime=" + latestPartTime
+                + " latestStopTime=" + latestStopTime
+                + " archiveTime=" + archiveTime
+                + " hasStopEvidence=" + hasStopEvidence
+                + " stopCoversArchive=" + stopCoversArchive
+                + " noPostArchiveParts=" + noPostArchiveParts
+              )
+              continue
+            }
+
+            // Timer expired and archive still looks final — send the done card.
+            debug(
+              "[arch:fire:done] "
+              + title
+              + " elapsed=" + elapsed + "ms >= " + ARCHIVE_GRACE_MS + "ms"
+              + " latestPartTime=" + latestPartTime
+              + " latestStopTime=" + latestStopTime
+            )
             try {
               const latest = await getLatestAssistantPart(session.id)
               const latestText = latest?.text ?? ""
