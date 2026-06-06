@@ -110,6 +110,18 @@ function fmtTime(ms: number | null | undefined): string {
 export async function sendNotify(params: NotifyParams): Promise<void> {
   const { appId, appSecret, sessionId, sessionTitle, kind, text, archiveTime, textTime } = params
 
+  // Runtime hard-stop: passive is done-only. If any stale or hidden path still
+  // tries to send a reply card, drop it here instead of trusting compile-time types.
+  if (kind !== "done") {
+    error(`[push] blocked non-done kind=${String(kind)}`, {
+      sessionId,
+      chatId: CHAT_ID,
+      archiveTime: archiveTime ?? null,
+      textTime: textTime ?? null,
+    })
+    return
+  }
+
   const t = shortTitle(sessionTitle, sessionId)
   const sections: CardArgs["sections"] = []
   const title = `✅ OpenCode 任务完成`
@@ -120,9 +132,6 @@ export async function sendNotify(params: NotifyParams): Promise<void> {
     type: "note",
     content: `结束时间: ${fmtTime(archiveTime)}  |  session: ${sessionId.slice(0, 12)}…`,
   })
-  // Summon all members so anyone in the chat sees the notification.
-  sections.push({ type: "markdown", content: "<at id=all></at>" })
-
   info(`[push] kind=${kind} session=${sessionId.slice(0, 12)} text_len=${text?.length ?? 0}`, {
     title,
     template,

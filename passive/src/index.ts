@@ -60,6 +60,26 @@ async function poll(): Promise<void> {
   const isStartup = !HAS_PRIMED_CURRENT_PROCESS
   const stateStatus = isStartup ? "startup" : "running"
 
+  // Process-local priming must not inherit pending done timers from older daemon
+  // windows. Otherwise a restart can replay historical @all completions even when
+  // the current process never observed those sessions go live.
+  if (isStartup) {
+    for (const [sessionId, entry] of Object.entries(state)) {
+      if (sessionId.startsWith("_")) continue
+      const e = entry as SessionTrackEntry | undefined
+      if (!e) continue
+      if (e.pendingDoneAt || e.lastSeenArchiveTime > 0) {
+        debug(
+          "[startup:clear-archive-tracking] "
+          + sessionId.slice(0, 18)
+          + " pendingDoneAt=" + (e.pendingDoneAt ?? 0)
+          + " lastSeenArchiveTime=" + (e.lastSeenArchiveTime ?? 0)
+        )
+        clearArchiveTracking(state, sessionId, e.lastSeenTime, e.lastSeenText || "")
+      }
+    }
+  }
+
   const activeSessions = await getActiveSessions()
   const archivedSessions = await getRecentlyArchivedSessions(ARCHIVE_GRACE_MS)
 
@@ -83,6 +103,8 @@ async function poll(): Promise<void> {
   const sessions = [...activeSessions, ...archivedSessions]
 
   if (sessions.length === 0) {
+    if (!DRY_RUN && isStartup) saveNotifiedState(state)
+    HAS_PRIMED_CURRENT_PROCESS = true
     logPoll(0, 0, undefined, 0)
     return
   }

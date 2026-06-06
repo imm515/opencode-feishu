@@ -107,6 +107,31 @@ passive/src/
   3. 没有 PID 标签的旧窗口结论，不能拿来指控当前新进程
 - 这条规则是为了避免把用户自己正在运行的 `opencode` 会话输出，误判成 passive reply/card 误发。
 
+## 2026-06-06 19:30 收口补充
+
+- 新增运行时保护：
+  - `passive/src/index.ts`
+    - startup 首轮即 `saveNotifiedState(state)`，这样即使当次没有 transitions，也会把内存中规范化后的 state 回写磁盘
+  - `passive/src/notify.ts`
+    - done 卡移除了 `<at id=all></at>`，后续若再出现误判 done，也不会形成连续 `@` 轰炸
+- 新运行窗口：
+  - `npm run build`
+  - `pwsh -File passive/scripts/start.ps1 -Action restart`
+  - 新 PID：`6508`
+  - 启动时间：`2026-06-06 19:30:17 +08:00`
+- 这次重启后的硬证据：
+  - `notify-state.json` 已被成功规范化写回，不再保留 legacy `lastDoneTime` / `pendingDoneTime`
+  - `2026-06-06.log` 在 `PID 6508` 启动后，当前采样仅见：
+    - startup
+    - DB opened
+    - lock acquired
+    - `poll: sessions=125 transitions=0`
+    - `[cycle] pushes=0`
+  - 截至当前采样，没有新的 `kind=reply`
+- 审计口径更新：
+  - `19:23` / `19:26` / `19:29` 的 reply 证据只能归属于旧窗口，不得继续拿来指控 `PID 6508`
+  - 但 `PID 6508` 仍需下一次真实用户事件验证，才能宣布 done-only 运行态真正恢复
+
 ## 目录结构
 
 ```
@@ -233,3 +258,23 @@ node dist/index.js --debounce-ms=3000 --fallback-ms=180000
 # 验证
 & "D:\Program Files Dev\opencode-feishu\passive\scripts\status.ps1"
 ```
+
+## 2026-06-06 当前稳定口径补充
+
+- 若用户说“疯狂弹 @”，先区分两层伤害：
+  1. 是否仍有 `reply` 中间卡误发
+  2. done 卡是否还带 `@all`
+- 当前 repo 新收口：
+  - `passive/src/notify.ts`
+    - done 卡已移除 `<at id=all></at>`
+  - `passive/src/index.ts`
+    - startup 首轮即保存规范化 state，避免旧 `notify-state.json` 字段长期滞留
+- 当前诊断口径：
+  - 旧窗口里的 `kind=reply` 不能继续用来指控新 PID
+  - 必须看当前 daemon startup 之后的日志窗口
+  - 还要同时看 `notify-state.json` 是否已清掉 legacy `lastDoneTime` / `pendingDoneTime`
+- 2026-06-06 19:30 验证结果：
+  - 新 PID `6508`
+  - `notify-state.json` 已成功规范化回写
+  - 截至采样点，新窗口后未见新的 `kind=reply`
+  - 但这仍只算“当前窗口暂时干净”，后续还要用真实用户事件再次验证 done-only 运行态
