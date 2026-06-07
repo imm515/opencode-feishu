@@ -1,5 +1,66 @@
 # opencode-feishu Passive Mode
 
+## Startup Rules Override (2026-06-07)
+
+This section supersedes older passive autostart notes in this file when they conflict.
+
+### Authoritative startup path
+
+- preferred boot-start mechanism:
+  - Startup shortcut only
+- old `OpenCodeFeishuPassive` Scheduled Task is no longer authoritative
+- after manual cleanup on 2026-06-07, the healthy expected state is:
+  - `scripts/status.ps1` reports `Task Scheduler: registered: no`
+- authoritative Startup shortcut:
+  - `C:\Users\Faye Wang\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\OpenCodeFeishuPassive.lnk`
+- authoritative desktop/archive shortcuts:
+  - `D:\格外可爱的\Desktop\OpenCodeFeishuPassive.lnk`
+  - `D:\Program Files Dev\快捷方式归档\OpenCode\OpenCodeFeishuPassive.lnk`
+- all launcher shortcuts should invoke:
+  - `cmd.exe /c chcp 65001 >nul && "C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "D:\Program Files Dev\opencode-feishu\passive\scripts\opencode_feishu_passive_ctl.ps1" auto`
+
+### UX contract
+
+- cold start:
+  - visible window
+  - about 10 seconds settle/countdown delay
+  - start the daemon
+  - auto-close about 3 seconds later
+- second launch while already running:
+  - enter interactive control menu
+  - do not flash-exit
+
+### Script ownership
+
+- control entry:
+  - `passive/scripts/opencode_feishu_passive_ctl.ps1`
+- autostart executor:
+  - `passive/scripts/opencode_feishu_passive_autostart.ps1`
+- compatibility wrapper:
+  - `passive/scripts/opencode_feishu_passive_autostart.bat`
+- installation helpers:
+  - `passive/scripts/install-startup.ps1`
+  - `passive/scripts/uninstall-startup.ps1`
+  - `passive/scripts/create-shortcuts.ps1`
+
+### Safety rules
+
+- preserve duplicate-start protection
+- `start.ps1` may skip if passive is already running
+- do not pre-write `.passive.lock` before daemon startup
+- let the daemon own `.passive.lock`
+- if the daemon is already running, the launcher should enter menu mode instead of trying a second start
+
+### Troubleshooting order
+
+1. inspect the Startup `.lnk` target and working directory
+2. inspect `opencode_feishu_passive_ctl.ps1` `auto` flow
+3. inspect actual live `node ... passive\\dist\\index.js` process
+4. inspect `.passive.pid` and `.passive.lock`
+5. only then decide whether the issue is shortcut drift, wrapper drift, stale state, or daemon failure
+
+If older sections below still describe Task Scheduler as the main passive startup mechanism, treat this override section as the current truth.
+
 ## 概述
 
 被动模式是一个**完全独立**的 Node.js 服务，不依赖 opencode-feishu 插件，实现：

@@ -16,8 +16,31 @@
 
 ## Autostart UX
 
-- `Startup\OpenCodeFeishuPassive.lnk` should point to the visible `.bat` wrapper, not a hidden launcher
-- expected user-facing flow:
-  - 10 second countdown
-  - start or skip
-  - 3 second tail exit
+- preferred autostart mechanism is now:
+  - Startup shortcut only
+- legacy Scheduled Task is no longer authoritative and was manually removed on 2026-06-07
+- authoritative Startup shortcut:
+  - `C:\Users\Faye Wang\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\OpenCodeFeishuPassive.lnk`
+- authoritative desktop/archive launchers:
+  - `D:\格外可爱的\Desktop\OpenCodeFeishuPassive.lnk`
+  - `D:\Program Files Dev\快捷方式归档\OpenCode\OpenCodeFeishuPassive.lnk`
+- all should point to:
+  - `cmd.exe /c chcp 65001 >nul && "C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "D:\Program Files Dev\opencode-feishu\passive\scripts\opencode_feishu_passive_ctl.ps1" auto`
+
+### UX contract
+
+- cold start:
+  - visible launcher window
+  - wait about 10 seconds
+  - start through the passive control/autostart chain
+  - auto-close about 3 seconds later
+- second launch while already running:
+  - enter interactive control menu
+  - do not flash-exit
+
+### Safety rules
+
+- keep duplicate-start protection
+- do not pre-write `.passive.lock` from `passive/scripts/start.ps1`
+- trust the daemon's own lock lifecycle
+- if a future startup failure mentions `Access is denied` around Scheduled Task cleanup, treat that as a permission/UAC question first, not a daemon-state fact
